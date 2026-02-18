@@ -1,6 +1,6 @@
 # Colab Deployment (T4)
 
-Use `voicebox_t4_deploy.ipynb` to run the full Voicebox backend in Google Colab, so Colab handles all Qwen3-TTS audio generation.
+Use `voicebox_t4_deploy.example.ipynb` as the versioned template to run the full Voicebox backend in Google Colab, so Colab handles all Qwen3-TTS audio generation.
 
 ## What the notebook configures
 
@@ -33,6 +33,12 @@ The notebook prints:
 2. Set `Server URL` to the ngrok URL.
 3. Set `API Key` to `VOICEBOX_API_KEY`.
 4. Save and run a generation.
+
+## Local notebook workflow
+
+- Keep your personal runnable notebook at `docs/colab/voicebox_t4_deploy.ipynb` (ignored by git).
+- Start from the tracked template:
+  - `cp docs/colab/voicebox_t4_deploy.example.ipynb docs/colab/voicebox_t4_deploy.ipynb`
 
 ## Notes
 
