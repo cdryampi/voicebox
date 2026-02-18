@@ -1,43 +1,47 @@
-import { useServerStore } from '@/stores/serverStore';
 import type { LanguageCode } from '@/lib/constants/languages';
+import { useServerStore } from '@/stores/serverStore';
 import type {
-  VoiceProfileCreate,
-  VoiceProfileResponse,
-  ProfileSampleResponse,
+  ActiveTasksResponse,
   GenerationRequest,
   GenerationResponse,
-  HistoryQuery,
-  HistoryListResponse,
-  HistoryResponse,
-  TranscriptionResponse,
+  GroqModelsResponse,
   HealthResponse,
-  ModelStatusListResponse,
+  HistoryListResponse,
+  HistoryQuery,
+  HistoryResponse,
   ModelDownloadRequest,
-  ActiveTasksResponse,
+  ModelProgress,
+  ModelStatusListResponse,
+  ProfileSampleResponse,
+  StoryComposeWithGroqRequest,
   StoryCreate,
-  StoryResponse,
   StoryDetailResponse,
+  StoryItemBatchUpdate,
   StoryItemCreate,
   StoryItemDetail,
-  StoryItemBatchUpdate,
-  StoryItemReorder,
   StoryItemMove,
-  StoryItemTrim,
+  StoryItemReorder,
   StoryItemSplit,
-  StoryComposeWithGroqRequest,
+  StoryItemTrim,
   StoryRenderJobResponse,
-  GroqModelsResponse,
+  StoryResponse,
   StudioDraftCreateRequest,
-  StudioDraftResponse,
-  StudioDraftListItem,
   StudioDraftDetailResponse,
+  StudioDraftLinesDeleteRequest,
   StudioDraftLinesUpdateRequest,
+  StudioDraftListItem,
+  StudioDraftResponse,
   StudioPreviewResponse,
   StudioRenderFinalResponse,
+  TranscriptionResponse,
+  VoiceProfileCreate,
+  VoiceProfileResponse,
 } from './types';
 
 class ApiClient {
   private static readonly NGROK_BYPASS_HEADER = 'ngrok-skip-browser-warning';
+  private supportsProgressSnapshot: boolean | null = null;
+  private supportsStudioBatchDelete: boolean | null = null;
 
   private getBaseUrl(): string {
     const serverUrl = useServerStore.getState().serverUrl;
@@ -101,6 +105,29 @@ class ApiClient {
     });
   }
 
+  private async requestBlob(endpoint: string): Promise<Blob> {
+    const url = `${this.getBaseUrl()}${endpoint}`;
+    const response = await this.fetchWithAuth(url);
+
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({
+        detail: response.statusText,
+      }));
+      throw new Error(error.detail || `HTTP error! status: ${response.status}`);
+    }
+
+    const contentType = response.headers.get('content-type') || '';
+    if (contentType.includes('text/html')) {
+      const htmlPayload = await response.text();
+      if (this.isNgrokWarningHtml(htmlPayload)) {
+        throw this.getNgrokWarningError();
+      }
+      throw new Error(`Unexpected HTML response for ${endpoint}`);
+    }
+
+    return response.blob();
+  }
+
   private async request<T>(endpoint: string, options?: RequestInit): Promise<T> {
     const url = `${this.getBaseUrl()}${endpoint}`;
     const response = await fetch(url, {
@@ -126,7 +153,9 @@ class ApiClient {
       } catch {
         if (payload.trim()) detail = payload;
       }
-      throw new Error(detail);
+      const error = new Error(detail) as Error & { status?: number };
+      error.status = response.status;
+      throw error;
     }
 
     if (!payload.trim()) {
@@ -177,7 +206,7 @@ class ApiClient {
   async addProfileSample(
     profileId: string,
     file: File,
-  referenceText: string,
+    referenceText: string,
   ): Promise<ProfileSampleResponse> {
     const url = `${this.getBaseUrl()}/profiles/${profileId}/samples`;
     const formData = new FormData();
@@ -339,7 +368,13 @@ class ApiClient {
     return response.blob();
   }
 
-  async importGeneration(file: File): Promise<{ id: string; profile_id: string; profile_name: string; text: string; message: string }> {
+  async importGeneration(file: File): Promise<{
+    id: string;
+    profile_id: string;
+    profile_name: string;
+    text: string;
+    message: string;
+  }> {
     const url = `${this.getBaseUrl()}/history/import`;
     const formData = new FormData();
     formData.append('file', file);
@@ -364,6 +399,10 @@ class ApiClient {
     return this.buildAuthedUrl(`/audio/${audioId}`);
   }
 
+  async getAudioBlob(audioId: string): Promise<Blob> {
+    return this.requestBlob(`/audio/${audioId}`);
+  }
+
   getSampleUrl(sampleId: string): string {
     return this.buildAuthedUrl(`/samples/${sampleId}`);
   }
@@ -374,6 +413,48 @@ class ApiClient {
 
   getModelProgressSseUrl(modelName: string): string {
     return this.buildAuthedUrl(`/models/progress/${modelName}`);
+  }
+
+  async getModelProgressSnapshot(modelName: string): Promise<ModelProgress | null> {
+    if (this.supportsProgressSnapshot === false) {
+      return null;
+    }
+
+    const url = `${this.getBaseUrl()}/models/progress-snapshot/${modelName}`;
+    const response = await this.fetchWithAuth(url);
+    const payload = await response.text();
+
+    if (this.isNgrokWarningHtml(payload)) {
+      throw this.getNgrokWarningError();
+    }
+
+    if (!response.ok) {
+      if (response.status === 404) {
+        this.supportsProgressSnapshot = false;
+        return null;
+      }
+
+      let detail = response.statusText || `HTTP error! status: ${response.status}`;
+      try {
+        const parsed = JSON.parse(payload) as { detail?: string };
+        if (parsed?.detail) detail = parsed.detail;
+      } catch {
+        if (payload.trim()) detail = payload;
+      }
+      throw new Error(detail);
+    }
+
+    this.supportsProgressSnapshot = true;
+
+    if (!payload.trim() || payload.trim() === 'null') {
+      return null;
+    }
+
+    try {
+      return JSON.parse(payload) as ModelProgress;
+    } catch {
+      throw new Error('Expected JSON response from /models/progress-snapshot endpoint.');
+    }
   }
 
   // Transcription
@@ -413,7 +494,12 @@ class ApiClient {
   }
 
   async triggerModelDownload(modelName: string): Promise<{ message: string }> {
-    console.log('[API] triggerModelDownload called for:', modelName, 'at', new Date().toISOString());
+    console.log(
+      '[API] triggerModelDownload called for:',
+      modelName,
+      'at',
+      new Date().toISOString(),
+    );
     const result = await this.request<{ message: string }>('/models/download', {
       method: 'POST',
       body: JSON.stringify({ model_name: modelName } as ModelDownloadRequest),
@@ -446,10 +532,7 @@ class ApiClient {
     return this.request('/channels');
   }
 
-  async createChannel(data: {
-    name: string;
-    device_ids: string[];
-  }): Promise<{
+  async createChannel(data: { name: string; device_ids: string[] }): Promise<{
     id: string;
     name: string;
     is_default: boolean;
@@ -491,10 +574,7 @@ class ApiClient {
     return this.request(`/channels/${channelId}/voices`);
   }
 
-  async setChannelVoices(
-    channelId: string,
-    profileIds: string[],
-  ): Promise<{ message: string }> {
+  async setChannelVoices(channelId: string, profileIds: string[]): Promise<{ message: string }> {
     return this.request(`/channels/${channelId}/voices`, {
       method: 'PUT',
       body: JSON.stringify({ profile_ids: profileIds }),
@@ -505,10 +585,7 @@ class ApiClient {
     return this.request(`/profiles/${profileId}/channels`);
   }
 
-  async setProfileChannels(
-    profileId: string,
-    channelIds: string[],
-  ): Promise<{ message: string }> {
+  async setProfileChannels(profileId: string, channelIds: string[]): Promise<{ message: string }> {
     return this.request(`/profiles/${profileId}/channels`, {
       method: 'PUT',
       body: JSON.stringify({ channel_ids: channelIds }),
@@ -571,21 +648,33 @@ class ApiClient {
     });
   }
 
-  async moveStoryItem(storyId: string, itemId: string, data: StoryItemMove): Promise<StoryItemDetail> {
+  async moveStoryItem(
+    storyId: string,
+    itemId: string,
+    data: StoryItemMove,
+  ): Promise<StoryItemDetail> {
     return this.request<StoryItemDetail>(`/stories/${storyId}/items/${itemId}/move`, {
       method: 'PUT',
       body: JSON.stringify(data),
     });
   }
 
-  async trimStoryItem(storyId: string, itemId: string, data: StoryItemTrim): Promise<StoryItemDetail> {
+  async trimStoryItem(
+    storyId: string,
+    itemId: string,
+    data: StoryItemTrim,
+  ): Promise<StoryItemDetail> {
     return this.request<StoryItemDetail>(`/stories/${storyId}/items/${itemId}/trim`, {
       method: 'PUT',
       body: JSON.stringify(data),
     });
   }
 
-  async splitStoryItem(storyId: string, itemId: string, data: StoryItemSplit): Promise<StoryItemDetail[]> {
+  async splitStoryItem(
+    storyId: string,
+    itemId: string,
+    data: StoryItemSplit,
+  ): Promise<StoryItemDetail[]> {
     return this.request<StoryItemDetail[]>(`/stories/${storyId}/items/${itemId}/split`, {
       method: 'POST',
       body: JSON.stringify(data),
@@ -649,17 +738,73 @@ class ApiClient {
     });
   }
 
-  async generateStudioLinePreview(
+  async deleteStudioDraftLines(
     draftId: string,
-    lineId: string,
-  ): Promise<StudioPreviewResponse> {
-    return this.request<StudioPreviewResponse>(`/studio/drafts/${draftId}/lines/${lineId}/preview`, {
-      method: 'POST',
-    });
+    data: StudioDraftLinesDeleteRequest,
+  ): Promise<StudioDraftDetailResponse> {
+    const emulateDeleteWithUpdate = async (): Promise<StudioDraftDetailResponse> => {
+      const draft = await this.getStudioDraft(draftId);
+      const toDelete = new Set(data.line_ids.map((id) => id.trim()).filter(Boolean));
+      const remaining = draft.lines.filter((line) => !toDelete.has(line.id));
+      if (remaining.length === draft.lines.length) {
+        return draft;
+      }
+      if (remaining.length === 0) {
+        throw new Error(
+          'Your backend is old and cannot delete all cards in one action. Leave at least one card, or update backend in Colab.',
+        );
+      }
+      return this.updateStudioDraftLines(draftId, {
+        lines: remaining.map((line, index) => ({
+          line_id: line.id,
+          order_index: index,
+          character_name: line.character_name,
+          text: line.text,
+          emotion: line.emotion,
+          emotion_intensity: line.emotion_intensity,
+        })),
+      });
+    };
+
+    if (this.supportsStudioBatchDelete === false) {
+      return emulateDeleteWithUpdate();
+    }
+
+    const endpoint = `/studio/drafts/${draftId}/lines/delete`;
+    try {
+      const response = await this.request<StudioDraftDetailResponse>(endpoint, {
+        method: 'POST',
+        body: JSON.stringify(data),
+      });
+      this.supportsStudioBatchDelete = true;
+      return response;
+    } catch (error) {
+      const status = (error as { status?: number })?.status;
+      const message =
+        error instanceof Error ? error.message.toLowerCase() : String(error).toLowerCase();
+      if (status === 404 || message.includes('not found') || message.includes('404')) {
+        this.supportsStudioBatchDelete = false;
+        return emulateDeleteWithUpdate();
+      }
+      throw error;
+    }
+  }
+
+  async generateStudioLinePreview(draftId: string, lineId: string): Promise<StudioPreviewResponse> {
+    return this.request<StudioPreviewResponse>(
+      `/studio/drafts/${draftId}/lines/${lineId}/preview`,
+      {
+        method: 'POST',
+      },
+    );
   }
 
   getStudioLinePreviewUrl(draftId: string, lineId: string): string {
     return this.buildAuthedUrl(`/studio/drafts/${draftId}/lines/${lineId}/preview/audio`);
+  }
+
+  async getStudioLinePreviewBlob(draftId: string, lineId: string): Promise<Blob> {
+    return this.requestBlob(`/studio/drafts/${draftId}/lines/${lineId}/preview/audio`);
   }
 
   async renderStudioDraftFinal(draftId: string): Promise<StudioRenderFinalResponse> {

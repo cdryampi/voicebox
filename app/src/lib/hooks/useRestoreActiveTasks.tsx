@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { apiClient } from '@/lib/api/client';
-import { useGenerationStore } from '@/stores/generationStore';
 import type { ActiveDownloadTask } from '@/lib/api/types';
+import { useGenerationStore } from '@/stores/generationStore';
 
 // Polling interval in milliseconds
 const POLL_INTERVAL = 2000;
@@ -10,20 +10,22 @@ const POLL_INTERVAL = 2000;
  * Hook to monitor active tasks (downloads and generations).
  * Polls the server periodically to catch downloads triggered from anywhere
  * (transcription, generation, explicit download, etc.).
- * 
+ *
  * Returns the active downloads so components can render download toasts.
  */
 export function useRestoreActiveTasks() {
   const [activeDownloads, setActiveDownloads] = useState<ActiveDownloadTask[]>([]);
   const setIsGenerating = useGenerationStore((state) => state.setIsGenerating);
   const setActiveGenerationId = useGenerationStore((state) => state.setActiveGenerationId);
-  
+  const consecutiveFailuresRef = useRef(0);
+
   // Track which downloads we've seen to detect new ones
   const seenDownloadsRef = useRef<Set<string>>(new Set());
 
   const fetchActiveTasks = useCallback(async () => {
     try {
       const tasks = await apiClient.getActiveTasks();
+      consecutiveFailuresRef.current = 0;
 
       // Update generation state
       if (tasks.generations.length > 0) {
@@ -41,34 +43,58 @@ export function useRestoreActiveTasks() {
       // Update active downloads
       // Keep track of all active downloads (including new ones)
       const currentDownloadNames = new Set(tasks.downloads.map((d) => d.model_name));
-      
+
       // Remove completed downloads from our seen set
       for (const name of seenDownloadsRef.current) {
         if (!currentDownloadNames.has(name)) {
           seenDownloadsRef.current.delete(name);
         }
       }
-      
+
       // Add new downloads to seen set
       for (const download of tasks.downloads) {
         seenDownloadsRef.current.add(download.model_name);
       }
 
       setActiveDownloads(tasks.downloads);
+      return true;
     } catch (error) {
       // Silently fail - server might be temporarily unavailable
       console.debug('Failed to fetch active tasks:', error);
+      consecutiveFailuresRef.current += 1;
+      return false;
     }
   }, [setIsGenerating, setActiveGenerationId]);
 
   useEffect(() => {
-    // Fetch immediately on mount
-    fetchActiveTasks();
+    let timeoutId: number | null = null;
+    let cancelled = false;
 
-    // Poll for active tasks
-    const interval = setInterval(fetchActiveTasks, POLL_INTERVAL);
+    const scheduleNext = (delayMs: number) => {
+      if (cancelled) return;
+      timeoutId = window.setTimeout(async () => {
+        const ok = await fetchActiveTasks();
+        if (!ok && consecutiveFailuresRef.current >= 6) {
+          // Connection is probably down (ngrok/session dead). Pause polling to avoid console spam.
+          scheduleNext(5 * 60 * 1000);
+          return;
+        }
+        const backoff =
+          !ok && consecutiveFailuresRef.current >= 3
+            ? Math.min(30000, POLL_INTERVAL * consecutiveFailuresRef.current)
+            : POLL_INTERVAL;
+        scheduleNext(backoff);
+      }, delayMs);
+    };
 
-    return () => clearInterval(interval);
+    scheduleNext(0);
+
+    return () => {
+      cancelled = true;
+      if (timeoutId !== null) {
+        window.clearTimeout(timeoutId);
+      }
+    };
   }, [fetchActiveTasks]);
 
   return activeDownloads;

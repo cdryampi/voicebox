@@ -92,11 +92,11 @@ export function useStoryPlayback(items: StoryItemDetail[] | undefined) {
     const preloadPromises: Promise<void>[] = [];
     for (const item of items) {
       if (!audioBuffersRef.current.has(item.generation_id)) {
-        const audioUrl = apiClient.getAudioUrl(item.generation_id);
         console.log('[StoryPlayback] Preloading audio buffer:', item.generation_id);
 
-        const preloadPromise = fetch(audioUrl)
-          .then((response) => response.arrayBuffer())
+        const preloadPromise = apiClient
+          .getAudioBlob(item.generation_id)
+          .then((blob) => blob.arrayBuffer())
           .then((arrayBuffer) => audioContext.decodeAudioData(arrayBuffer))
           .then((audioBuffer) => {
             audioBuffersRef.current.set(item.generation_id, audioBuffer);
@@ -224,7 +224,7 @@ export function useStoryPlayback(items: StoryItemDetail[] | undefined) {
 
           // Calculate when this item should start in AudioContext time
           const itemStartContextTime = storyTimeToContextTime(item.start_time_ms);
-          
+
           // Calculate effective duration and trim offsets
           const trimStartSec = (item.trim_start_ms || 0) / 1000;
           const trimEndSec = (item.trim_end_ms || 0) / 1000;

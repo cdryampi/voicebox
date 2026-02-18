@@ -511,6 +511,11 @@ class StudioDraftLinesUpdateRequest(BaseModel):
     lines: List[StudioDraftLineUpdate] = Field(..., min_length=1)
 
 
+class StudioDraftLinesDeleteRequest(BaseModel):
+    """Batch line delete request for Studio drafts."""
+    line_ids: List[str] = Field(..., min_length=1)
+
+
 class StudioPreviewResponse(BaseModel):
     """Response for single card preview generation."""
     line_id: str

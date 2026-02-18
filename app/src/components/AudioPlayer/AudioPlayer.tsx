@@ -7,8 +7,8 @@ import { Slider } from '@/components/ui/slider';
 import { apiClient } from '@/lib/api/client';
 import { formatAudioDuration } from '@/lib/utils/audio';
 import { debug } from '@/lib/utils/debug';
-import { usePlayerStore } from '@/stores/playerStore';
 import { usePlatform } from '@/platform/PlatformContext';
+import { usePlayerStore } from '@/stores/playerStore';
 
 export function AudioPlayer() {
   const platform = usePlatform();
@@ -72,11 +72,78 @@ export function AudioPlayer() {
   const isUsingNativePlaybackRef = useRef(false);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [playbackUrl, setPlaybackUrl] = useState<string | null>(null);
+  const playbackBlobUrlRef = useRef<string | null>(null);
 
-  // Initialize WaveSurfer (only when audioUrl exists and container is ready)
+  // Resolve audio through authenticated fetch to avoid ngrok HTML interstitial on direct media URLs.
   useEffect(() => {
-    // Don't initialize if no audioUrl or already initialized
+    let cancelled = false;
+
+    const revokePlaybackBlob = () => {
+      if (playbackBlobUrlRef.current) {
+        URL.revokeObjectURL(playbackBlobUrlRef.current);
+        playbackBlobUrlRef.current = null;
+      }
+    };
+
     if (!audioUrl) {
+      revokePlaybackBlob();
+      setPlaybackUrl(null);
+      return () => {
+        cancelled = true;
+      };
+    }
+
+    if (!audioId) {
+      revokePlaybackBlob();
+      setPlaybackUrl(audioUrl);
+      return () => {
+        cancelled = true;
+      };
+    }
+
+    setIsLoading(true);
+    void apiClient
+      .getAudioBlob(audioId)
+      .then((blob) => {
+        if (cancelled) return;
+        revokePlaybackBlob();
+        const blobUrl = URL.createObjectURL(blob);
+        playbackBlobUrlRef.current = blobUrl;
+        setPlaybackUrl(blobUrl);
+        setError(null);
+      })
+      .catch((fetchError) => {
+        if (cancelled) return;
+        debug.error('Failed to resolve audio blob, using direct URL fallback:', fetchError);
+        revokePlaybackBlob();
+        setPlaybackUrl(audioUrl);
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setIsLoading(false);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [audioId, audioUrl]);
+
+  useEffect(
+    () => () => {
+      if (playbackBlobUrlRef.current) {
+        URL.revokeObjectURL(playbackBlobUrlRef.current);
+        playbackBlobUrlRef.current = null;
+      }
+    },
+    [],
+  );
+
+  // Initialize WaveSurfer (only when playback URL exists and container is ready)
+  useEffect(() => {
+    // Don't initialize if no playback URL or already initialized
+    if (!playbackUrl) {
       return;
     }
 
@@ -187,6 +254,7 @@ export function AudioPlayer() {
         // Auto-play when ready - check if we should use native playback
         // Get current values from the store and queries at runtime (not captured closure values)
         const currentAudioUrl = usePlayerStore.getState().audioUrl;
+        const currentAudioId = usePlayerStore.getState().audioId;
         const currentProfileId = usePlayerStore.getState().profileId;
 
         debug.log('Auto-play check - capturing runtime values...');
@@ -212,6 +280,7 @@ export function AudioPlayer() {
         debug.log('Auto-play check:', {
           isTauri: platform.metadata.isTauri,
           currentAudioUrl,
+          currentAudioId,
           currentProfileId,
           hasProfileChannels: !!runtimeProfileChannels,
           hasChannels: !!runtimeChannels,
@@ -219,7 +288,7 @@ export function AudioPlayer() {
 
         if (
           platform.metadata.isTauri &&
-          currentAudioUrl &&
+          (currentAudioUrl || currentAudioId) &&
           currentProfileId &&
           runtimeProfileChannels &&
           runtimeChannels
@@ -270,10 +339,11 @@ export function AudioPlayer() {
               debug.log('Device IDs to play to:', deviceIds);
 
               if (deviceIds.length > 0) {
-                debug.log('Fetching audio data from:', currentAudioUrl);
-                // Fetch audio data
-                const response = await fetch(currentAudioUrl);
-                const audioData = new Uint8Array(await response.arrayBuffer());
+                debug.log('Fetching audio data for native playback');
+                const audioBlob = currentAudioId
+                  ? await apiClient.getAudioBlob(currentAudioId)
+                  : await fetch(currentAudioUrl as string).then((response) => response.blob());
+                const audioData = new Uint8Array(await audioBlob.arrayBuffer());
                 debug.log('Audio data size:', audioData.length);
 
                 // Play via native audio
@@ -359,7 +429,7 @@ export function AudioPlayer() {
         if (shouldAutoPlayNow) {
           // Clear the flag first
           usePlayerStore.getState().clearAutoPlayFlag();
-          
+
           // Use a small delay to ensure audio element is fully ready
           setTimeout(() => {
             wavesurfer.play().catch((error) => {
@@ -430,9 +500,9 @@ export function AudioPlayer() {
         }
       });
 
-      // Load audio immediately if audioUrl is already set
-      if (audioUrl) {
-        debug.log('WaveSurfer ready, loading audio:', audioUrl);
+      // Load audio immediately if playback URL is already set
+      if (playbackUrl) {
+        debug.log('WaveSurfer ready, loading audio:', playbackUrl);
         loadingRef.current = true;
         setIsLoading(true);
         // Stop any current playback before loading new audio
@@ -440,7 +510,7 @@ export function AudioPlayer() {
           wavesurfer.pause();
         }
         wavesurfer
-          .load(audioUrl)
+          .load(playbackUrl)
           .then(() => {
             debug.log('Audio loaded into WaveSurfer');
             loadingRef.current = false;
@@ -490,15 +560,15 @@ export function AudioPlayer() {
         wavesurferRef.current = null;
       }
     };
-  }, [audioUrl, setIsPlaying, setCurrentTime, setDuration]);
+  }, [playbackUrl, setIsPlaying, setCurrentTime, setDuration]);
 
   // Load audio when URL changes (only if WaveSurfer is already initialized)
   useEffect(() => {
     const wavesurfer = wavesurferRef.current;
 
-    if (!audioUrl || !wavesurfer) {
+    if (!playbackUrl || !wavesurfer) {
       // Reset state when no audio or WaveSurfer not ready
-      if (!audioUrl && wavesurfer) {
+      if (!playbackUrl && wavesurfer) {
         wavesurfer.pause();
         wavesurfer.seekTo(0);
         loadingRef.current = false;
@@ -535,7 +605,7 @@ export function AudioPlayer() {
 
     // CRITICAL: Force stop any current playback and cancel any pending loads
     // This must happen BEFORE any early returns
-    debug.log('Audio URL changed to:', audioUrl);
+    debug.log('Audio URL changed to:', playbackUrl);
 
     // COMPLETELY stop and destroy the current audio
     try {
@@ -573,21 +643,21 @@ export function AudioPlayer() {
     setDuration(0);
 
     // Load new audio
-    debug.log('Starting new audio load for:', audioUrl);
+    debug.log('Starting new audio load for:', playbackUrl);
     wavesurfer
-      .load(audioUrl)
+      .load(playbackUrl)
       .then(() => {
         debug.log('Audio load promise resolved');
         // Don't set loading to false here - wait for 'ready' event
       })
       .catch((error) => {
         debug.error('Failed to load audio:', error);
-        debug.error('Audio URL:', audioUrl);
+        debug.error('Audio URL:', playbackUrl);
         loadingRef.current = false;
         setIsLoading(false);
         setError(`Failed to load audio: ${error instanceof Error ? error.message : String(error)}`);
       });
-  }, [audioUrl, setCurrentTime, setDuration]);
+  }, [playbackUrl, setCurrentTime, setDuration]);
 
   // Sync play/pause state (only when user clicks play/pause button, not auto-sync)
   // This effect is kept for external state changes but should be minimal
@@ -664,7 +734,7 @@ export function AudioPlayer() {
   // Handle shouldAutoPlay flag - for story mode auto-advance
   const shouldAutoPlay = usePlayerStore((state) => state.shouldAutoPlay);
   const clearAutoPlayFlag = usePlayerStore((state) => state.clearAutoPlayFlag);
-  
+
   useEffect(() => {
     const wavesurfer = wavesurferRef.current;
     if (!wavesurfer || !shouldAutoPlay || duration === 0) {
@@ -702,7 +772,7 @@ export function AudioPlayer() {
     }
 
     // If using native playback
-    if (useNativePlayback && audioUrl && profileChannels && channels) {
+    if (useNativePlayback && playbackUrl && profileChannels && channels) {
       if (isPlaying) {
         // Pause: stop native playback and pause WaveSurfer visualization
         try {
@@ -733,8 +803,10 @@ export function AudioPlayer() {
 
         if (deviceIds.length > 0) {
           // Fetch audio data
-          const response = await fetch(audioUrl);
-          const audioData = new Uint8Array(await response.arrayBuffer());
+          const audioBlob = audioId
+            ? await apiClient.getAudioBlob(audioId)
+            : await fetch(playbackUrl).then((r) => r.blob());
+          const audioData = new Uint8Array(await audioBlob.arrayBuffer());
 
           // Play via native audio
           await platform.audio.playToDevices(audioData, deviceIds);

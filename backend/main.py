@@ -1034,6 +1034,26 @@ async def update_studio_draft_lines(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.post("/studio/drafts/{draft_id}/lines/delete", response_model=models.StudioDraftDetailResponse)
+async def delete_studio_draft_lines(
+    draft_id: str,
+    data: models.StudioDraftLinesDeleteRequest,
+    db: Session = Depends(get_db),
+):
+    """Delete one or more Studio draft cards."""
+    try:
+        updated = await studio_drafts.delete_studio_draft_lines(draft_id, data, db)
+        if not updated:
+            raise HTTPException(status_code=404, detail="Studio draft not found")
+        return updated
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.post("/studio/drafts/{draft_id}/lines/{line_id}/preview", response_model=models.StudioPreviewResponse)
 async def generate_studio_preview(
     draft_id: str,
@@ -1391,6 +1411,13 @@ async def get_model_progress(model_name: str):
             "X-Accel-Buffering": "no",
         },
     )
+
+
+@app.get("/models/progress-snapshot/{model_name}")
+async def get_model_progress_snapshot(model_name: str):
+    """Get latest model download progress as JSON (polling-friendly)."""
+    progress_manager = get_progress_manager()
+    return progress_manager.get_progress(model_name)
 
 
 @app.get("/models/status", response_model=models.ModelStatusListResponse)

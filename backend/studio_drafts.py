@@ -28,6 +28,7 @@ from .models import (
     StudioDraftCreateRequest,
     StudioDraftDetailResponse,
     StudioDraftLineResponse,
+    StudioDraftLinesDeleteRequest,
     StudioDraftLinesUpdateRequest,
     StudioDraftResponse,
     StudioLimits,
@@ -102,6 +103,33 @@ def _resolve_limits(limits: Optional[StudioLimits]) -> StudioLimits:
 
 def _preview_audio_url(draft_id: str, line_id: str) -> str:
     return f"/studio/drafts/{draft_id}/lines/{line_id}/preview/audio"
+
+
+def _truncate_line_text(raw_text: str, max_chars: int) -> tuple[str, bool]:
+    cleaned = raw_text.strip()
+    if len(cleaned) <= max_chars:
+        return cleaned, False
+
+    window = cleaned[: max_chars + 1]
+    preferred_breaks = [
+        window.rfind(". "),
+        window.rfind("? "),
+        window.rfind("! "),
+        window.rfind("; "),
+        window.rfind(": "),
+        window.rfind(", "),
+        window.rfind(" "),
+    ]
+    cut_at = max(preferred_breaks)
+    if cut_at < int(max_chars * 0.6):
+        cut_at = max_chars
+    else:
+        cut_at += 1
+
+    truncated = window[:cut_at].rstrip(" ,;:-")
+    if not truncated:
+        truncated = cleaned[:max_chars].rstrip()
+    return truncated, True
 
 
 def _parse_limits_from_db(raw_json: str) -> StudioLimits:
@@ -278,8 +306,7 @@ async def create_studio_draft(
         raw_text = str(raw.get("text", "")).strip()
         if not raw_text:
             continue
-        truncated = len(raw_text) > limits.max_chars_per_line
-        text = raw_text[: limits.max_chars_per_line]
+        text, truncated = _truncate_line_text(raw_text, limits.max_chars_per_line)
 
         raw_emotion = _normalize_emotion(str(raw.get("emotion", "neutral")))
         raw_intensity = raw.get("emotion_intensity", mapping.default_emotion_intensity)
@@ -404,8 +431,7 @@ async def update_studio_draft_lines(
             raw_text = update.text.strip()
             if not raw_text:
                 raise ValueError("text cannot be empty")
-            line.truncated = len(raw_text) > limits.max_chars_per_line
-            line.text = raw_text[: limits.max_chars_per_line]
+            line.text, line.truncated = _truncate_line_text(raw_text, limits.max_chars_per_line)
             changed = True
 
         if update.emotion is not None:
@@ -425,6 +451,50 @@ async def update_studio_draft_lines(
             line.preview_duration = None
             line.preview_status = "idle"
             line.preview_error = None
+            line.updated_at = datetime.utcnow()
+
+    draft.updated_at = datetime.utcnow()
+    db.commit()
+    return await get_studio_draft(draft_id, db)
+
+
+async def delete_studio_draft_lines(
+    draft_id: str,
+    data: StudioDraftLinesDeleteRequest,
+    db: Session,
+) -> Optional[StudioDraftDetailResponse]:
+    draft = db.query(DBStudioDraft).filter_by(id=draft_id).first()
+    if not draft:
+        return None
+
+    lines = (
+        db.query(DBStudioDraftLine)
+        .filter_by(draft_id=draft_id)
+        .order_by(DBStudioDraftLine.order_index.asc())
+        .all()
+    )
+    line_map = {line.id: line for line in lines}
+    line_ids = {line_id.strip() for line_id in data.line_ids if line_id.strip()}
+    if not line_ids:
+        raise ValueError("No line_ids provided")
+
+    missing = [line_id for line_id in line_ids if line_id not in line_map]
+    if missing:
+        raise ValueError(f"Draft line not found: {missing[0]}")
+
+    for line in lines:
+        if line.id in line_ids:
+            db.delete(line)
+
+    remaining = (
+        db.query(DBStudioDraftLine)
+        .filter_by(draft_id=draft_id)
+        .order_by(DBStudioDraftLine.order_index.asc())
+        .all()
+    )
+    for idx, line in enumerate(remaining):
+        if line.order_index != idx:
+            line.order_index = idx
             line.updated_at = datetime.utcnow()
 
     draft.updated_at = datetime.utcnow()

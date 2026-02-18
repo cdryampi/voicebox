@@ -1,6 +1,18 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { apiClient } from '@/lib/api/client';
-import type { StoryCreate, StoryItemCreate, StoryItemBatchUpdate, StoryItemReorder, StoryItemMove, StoryItemTrim, StoryItemSplit } from '@/lib/api/types';
+import type {
+  StoryComposeWithGroqRequest,
+  StoryCreate,
+  StoryItemBatchUpdate,
+  StoryItemCreate,
+  StoryItemMove,
+  StoryItemReorder,
+  StoryItemSplit,
+  StoryItemTrim,
+  StudioDraftCreateRequest,
+  StudioDraftLinesDeleteRequest,
+  StudioDraftLinesUpdateRequest,
+} from '@/lib/api/types';
 import { usePlatform } from '@/platform/PlatformContext';
 
 export function useStories() {
@@ -109,8 +121,15 @@ export function useMoveStoryItem() {
   const queryClient = useQueryClient();
 
   return useMutation({
-    mutationFn: ({ storyId, itemId, data }: { storyId: string; itemId: string; data: StoryItemMove }) =>
-      apiClient.moveStoryItem(storyId, itemId, data),
+    mutationFn: ({
+      storyId,
+      itemId,
+      data,
+    }: {
+      storyId: string;
+      itemId: string;
+      data: StoryItemMove;
+    }) => apiClient.moveStoryItem(storyId, itemId, data),
     onSuccess: (_, variables) => {
       queryClient.invalidateQueries({ queryKey: ['stories'] });
       queryClient.invalidateQueries({ queryKey: ['stories', variables.storyId] });
@@ -122,8 +141,15 @@ export function useTrimStoryItem() {
   const queryClient = useQueryClient();
 
   return useMutation({
-    mutationFn: ({ storyId, itemId, data }: { storyId: string; itemId: string; data: StoryItemTrim }) =>
-      apiClient.trimStoryItem(storyId, itemId, data),
+    mutationFn: ({
+      storyId,
+      itemId,
+      data,
+    }: {
+      storyId: string;
+      itemId: string;
+      data: StoryItemTrim;
+    }) => apiClient.trimStoryItem(storyId, itemId, data),
     onSuccess: (_, variables) => {
       queryClient.invalidateQueries({ queryKey: ['stories'] });
       queryClient.invalidateQueries({ queryKey: ['stories', variables.storyId] });
@@ -135,8 +161,15 @@ export function useSplitStoryItem() {
   const queryClient = useQueryClient();
 
   return useMutation({
-    mutationFn: ({ storyId, itemId, data }: { storyId: string; itemId: string; data: StoryItemSplit }) =>
-      apiClient.splitStoryItem(storyId, itemId, data),
+    mutationFn: ({
+      storyId,
+      itemId,
+      data,
+    }: {
+      storyId: string;
+      itemId: string;
+      data: StoryItemSplit;
+    }) => apiClient.splitStoryItem(storyId, itemId, data),
     onSuccess: (_, variables) => {
       queryClient.invalidateQueries({ queryKey: ['stories'] });
       queryClient.invalidateQueries({ queryKey: ['stories', variables.storyId] });
@@ -165,7 +198,10 @@ export function useExportStoryAudio() {
       const blob = await apiClient.exportStoryAudio(storyId);
 
       // Create safe filename
-      const safeName = storyName.substring(0, 50).replace(/[^a-z0-9]/gi, '-').toLowerCase();
+      const safeName = storyName
+        .substring(0, 50)
+        .replace(/[^a-z0-9]/gi, '-')
+        .toLowerCase();
       const filename = `${safeName || 'story'}.wav`;
 
       await platform.filesystem.saveFile(filename, blob, [
@@ -176,6 +212,107 @@ export function useExportStoryAudio() {
       ]);
 
       return blob;
+    },
+  });
+}
+
+export function useGroqModels() {
+  return useQuery({
+    queryKey: ['llm', 'groq', 'models'],
+    queryFn: () => apiClient.listGroqModels(),
+  });
+}
+
+export function useComposeStoryRoleplay() {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: (data: StoryComposeWithGroqRequest) => apiClient.composeStoryRoleplay(data),
+    onSuccess: (result) => {
+      queryClient.invalidateQueries({ queryKey: ['stories'] });
+      queryClient.invalidateQueries({ queryKey: ['stories', result.story_id] });
+    },
+  });
+}
+
+export function useStudioDraft(draftId: string | null) {
+  return useQuery({
+    queryKey: ['studio', 'drafts', draftId],
+    queryFn: () => apiClient.getStudioDraft(draftId!),
+    enabled: !!draftId,
+  });
+}
+
+export function useStudioDrafts(storyId?: string | null) {
+  return useQuery({
+    queryKey: ['studio', 'drafts', 'list', storyId ?? 'all'],
+    queryFn: () => apiClient.listStudioDrafts(storyId!),
+    enabled: !!storyId,
+  });
+}
+
+export function useCreateStudioDraft() {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: (data: StudioDraftCreateRequest) => apiClient.createStudioDraft(data),
+    onSuccess: (result) => {
+      queryClient.invalidateQueries({ queryKey: ['stories'] });
+      queryClient.invalidateQueries({ queryKey: ['stories', result.story_id] });
+      queryClient.invalidateQueries({ queryKey: ['studio', 'drafts', result.draft_id] });
+      queryClient.invalidateQueries({ queryKey: ['studio', 'drafts', 'list', result.story_id] });
+    },
+  });
+}
+
+export function useUpdateStudioDraftLines() {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: ({ draftId, data }: { draftId: string; data: StudioDraftLinesUpdateRequest }) =>
+      apiClient.updateStudioDraftLines(draftId, data),
+    onSuccess: (result) => {
+      queryClient.invalidateQueries({ queryKey: ['studio', 'drafts', result.draft_id] });
+      queryClient.invalidateQueries({ queryKey: ['studio', 'drafts', 'list', result.story_id] });
+    },
+  });
+}
+
+export function useDeleteStudioDraftLines() {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: ({ draftId, data }: { draftId: string; data: StudioDraftLinesDeleteRequest }) =>
+      apiClient.deleteStudioDraftLines(draftId, data),
+    onSuccess: (result) => {
+      queryClient.invalidateQueries({ queryKey: ['studio', 'drafts', result.draft_id] });
+      queryClient.invalidateQueries({ queryKey: ['studio', 'drafts', 'list', result.story_id] });
+    },
+  });
+}
+
+export function useGenerateStudioLinePreview() {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: ({ draftId, lineId }: { draftId: string; lineId: string }) =>
+      apiClient.generateStudioLinePreview(draftId, lineId),
+    onSuccess: (_, variables) => {
+      queryClient.invalidateQueries({ queryKey: ['studio', 'drafts', variables.draftId] });
+    },
+  });
+}
+
+export function useRenderStudioDraftFinal() {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: (draftId: string) => apiClient.renderStudioDraftFinal(draftId),
+    onSuccess: (result) => {
+      queryClient.invalidateQueries({ queryKey: ['stories'] });
+      queryClient.invalidateQueries({ queryKey: ['stories', result.story_id] });
+      queryClient.invalidateQueries({ queryKey: ['studio', 'drafts', result.draft_id] });
+      queryClient.invalidateQueries({ queryKey: ['studio', 'drafts', 'list', result.story_id] });
     },
   });
 }

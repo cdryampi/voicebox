@@ -34,6 +34,7 @@ export interface GenerationRequest {
   language: LanguageCode;
   seed?: number;
   model_size?: '1.7B' | '0.6B';
+  instruct?: string;
 }
 
 export interface GenerationResponse {
@@ -97,7 +98,7 @@ export interface ModelStatus {
   model_name: string;
   display_name: string;
   downloaded: boolean;
-  downloading: boolean;  // True if download is in progress
+  downloading: boolean; // True if download is in progress
   size_mb?: number;
   loaded: boolean;
 }
@@ -126,6 +127,7 @@ export interface ActiveGenerationTask {
 export interface ActiveTasksResponse {
   downloads: ActiveDownloadTask[];
   generations: ActiveGenerationTask[];
+  story_renders?: ActiveStoryRenderTask[];
 }
 
 export interface StoryCreate {
@@ -202,4 +204,158 @@ export interface StoryItemTrim {
 
 export interface StoryItemSplit {
   split_time_ms: number;
+}
+
+export interface ActiveStoryRenderTask {
+  job_id: string;
+  story_id: string;
+  status: string;
+  total_lines: number;
+  processed_lines: number;
+  started_at: string;
+}
+
+export type EmotionType = 'neutral' | 'happy' | 'sad' | 'angry' | 'fearful' | 'surprised' | 'calm';
+
+export interface StoryCharacterMapping {
+  character_name: string;
+  profile_id: string;
+  description?: string;
+  default_emotion?: EmotionType;
+  default_emotion_intensity?: number;
+  default_track?: number;
+}
+
+export interface StoryComposeWithGroqRequest {
+  name: string;
+  description?: string;
+  prompt: string;
+  mode: 'novela' | 'roleplay';
+  language: LanguageCode;
+  target_lines: number;
+  llm_model?: string;
+  model_size?: '1.7B' | '0.6B';
+  gap_ms?: number;
+  continue_on_error?: boolean;
+  character_mappings: StoryCharacterMapping[];
+}
+
+export interface StoryRenderJobResponse {
+  job_id: string;
+  story_id: string;
+  status: string;
+  total_lines: number;
+}
+
+export interface GroqModelsResponse {
+  enabled: boolean;
+  default_model: string;
+  models: string[];
+}
+
+export interface StudioLimits {
+  max_lines: number;
+  max_chars_per_line: number;
+  preview_seconds: number;
+}
+
+export interface StudioDraftCreateRequest {
+  story_id?: string;
+  name: string;
+  description?: string;
+  prompt: string;
+  mode: 'novela' | 'roleplay';
+  language: LanguageCode;
+  llm_model?: string;
+  model_size?: '1.7B' | '0.6B';
+  gap_ms?: number;
+  continue_on_error?: boolean;
+  character_mappings: StoryCharacterMapping[];
+  limits?: StudioLimits;
+}
+
+export interface StudioDraftResponse {
+  draft_id: string;
+  story_id: string;
+  line_count: number;
+  status: string;
+  limits_applied: StudioLimits;
+}
+
+export interface StudioDraftListItem {
+  draft_id: string;
+  story_id: string;
+  name: string;
+  status: string;
+  line_count: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface StudioDraftLineResponse {
+  id: string;
+  order_index: number;
+  character_name: string;
+  profile_id: string;
+  text: string;
+  emotion: EmotionType;
+  emotion_intensity: number;
+  truncated: boolean;
+  preview_status: string;
+  preview_audio_url?: string;
+  preview_duration?: number;
+  preview_error?: string;
+}
+
+export interface StudioDraftDetailResponse {
+  draft_id: string;
+  story_id: string;
+  name: string;
+  description?: string;
+  prompt: string;
+  mode: 'novela' | 'roleplay';
+  language: LanguageCode;
+  llm_model: string;
+  model_size?: '1.7B' | '0.6B';
+  gap_ms: number;
+  continue_on_error: boolean;
+  status: string;
+  limits_applied: StudioLimits;
+  character_mappings: StoryCharacterMapping[];
+  created_at: string;
+  updated_at: string;
+  lines: StudioDraftLineResponse[];
+}
+
+export interface StudioDraftLineUpdate {
+  line_id: string;
+  character_name?: string;
+  text?: string;
+  emotion?: EmotionType;
+  emotion_intensity?: number;
+  order_index?: number;
+}
+
+export interface StudioDraftLinesUpdateRequest {
+  lines: StudioDraftLineUpdate[];
+}
+
+export interface StudioDraftLinesDeleteRequest {
+  line_ids: string[];
+}
+
+export interface StudioPreviewResponse {
+  line_id: string;
+  status: string;
+  preview_audio_url?: string;
+  duration?: number;
+  error?: string;
+}
+
+export interface StudioRenderFinalResponse {
+  draft_id: string;
+  job_id: string;
+  story_id: string;
+  status: string;
+  total_lines: number;
 }
