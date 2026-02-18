@@ -7,6 +7,7 @@ import { apiClient } from '@/lib/api/client';
 import { LANGUAGE_CODES, type LanguageCode } from '@/lib/constants/languages';
 import { useGeneration } from '@/lib/hooks/useGeneration';
 import { useModelDownloadToast } from '@/lib/hooks/useModelDownloadToast';
+import { useNotifier } from '@/lib/hooks/useNotifier';
 import { useGenerationStore } from '@/stores/generationStore';
 import { useModelPreferencesStore } from '@/stores/modelPreferencesStore';
 import { usePlayerStore } from '@/stores/playerStore';
@@ -32,6 +33,7 @@ export function useGenerationForm(options: UseGenerationFormOptions = {}) {
   const setAudioWithAutoPlay = usePlayerStore((state) => state.setAudioWithAutoPlay);
   const setIsGenerating = useGenerationStore((state) => state.setIsGenerating);
   const defaultTtsModelSize = useModelPreferencesStore((state) => state.defaultTtsModelSize);
+  const { notify } = useNotifier();
   const [downloadingModelName, setDownloadingModelName] = useState<string | null>(null);
   const [downloadingDisplayName, setDownloadingDisplayName] = useState<string | null>(null);
 
@@ -97,6 +99,13 @@ export function useGenerationForm(options: UseGenerationFormOptions = {}) {
         title: 'Generation complete!',
         description: `Audio generated (${result.duration.toFixed(2)}s)`,
       });
+      void notify({
+        kind: 'completion',
+        title: 'Generation completed',
+        body: `Audio ready (${result.duration.toFixed(2)}s).`,
+        tag: `global-task:generation:${result.id}:completed`,
+        fallbackToToast: false,
+      });
 
       const audioUrl = apiClient.getAudioUrl(result.id);
       setAudioWithAutoPlay(audioUrl, result.id, selectedProfileId, data.text.substring(0, 50));
@@ -104,10 +113,19 @@ export function useGenerationForm(options: UseGenerationFormOptions = {}) {
       form.reset();
       options.onSuccess?.(result.id);
     } catch (error) {
+      const errorMessage =
+        error instanceof Error ? error.message : 'Failed to generate audio';
       toast({
         title: 'Generation failed',
-        description: error instanceof Error ? error.message : 'Failed to generate audio',
+        description: errorMessage,
         variant: 'destructive',
+      });
+      void notify({
+        kind: 'error',
+        title: 'Generation failed',
+        body: errorMessage,
+        tag: 'global-task:generation:failed',
+        fallbackToToast: false,
       });
     } finally {
       setIsGenerating(false);

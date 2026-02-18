@@ -1034,6 +1034,20 @@ async def compose_story_roleplay(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.post("/studio/director/suggestions", response_model=models.StudioDirectorSuggestionsResponse)
+async def studio_director_suggestions(
+    data: models.StudioDirectorSuggestionsRequest,
+    db: Session = Depends(get_db),
+):
+    """Generate four Story Director preset suggestions from a character description."""
+    try:
+        return await studio_drafts.generate_studio_director_suggestions(data, db)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.post("/studio/drafts", response_model=models.StudioDraftResponse)
 async def create_studio_draft(
     data: models.StudioDraftCreateRequest,

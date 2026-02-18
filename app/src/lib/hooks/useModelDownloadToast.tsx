@@ -4,6 +4,7 @@ import { Progress } from '@/components/ui/progress';
 import { useToast } from '@/components/ui/use-toast';
 import { apiClient } from '@/lib/api/client';
 import type { ModelProgress } from '@/lib/api/types';
+import { useNotifier } from '@/lib/hooks/useNotifier';
 import { useServerStore } from '@/stores/serverStore';
 
 interface UseModelDownloadToastOptions {
@@ -26,6 +27,7 @@ export function useModelDownloadToast({
   onError,
 }: UseModelDownloadToastOptions) {
   const { toast } = useToast();
+  const { notify } = useNotifier();
   const serverUrl = useServerStore((state) => state.serverUrl);
   const toastIdRef = useRef<string | null>(null);
   // biome-ignore lint: Using any for toast update ref to handle complex toast types
@@ -66,7 +68,14 @@ export function useModelDownloadToast({
     if (onError) {
       onError();
     }
-  }, [clearPolling, displayName, onError]);
+    void notify({
+      kind: 'error',
+      title: 'Model download failed',
+      body: `${displayName}: failed to track download progress.`,
+      tag: `global-task:download:${modelName}:failed`,
+      fallbackToToast: false,
+    });
+  }, [clearPolling, displayName, modelName, notify, onError]);
 
   const applyProgressUpdate = useCallback(
     (progress: ModelProgress) => {
@@ -151,8 +160,26 @@ export function useModelDownloadToast({
       } else if (isError && onError) {
         onError();
       }
+
+      if (isComplete) {
+        void notify({
+          kind: 'completion',
+          title: 'Model download completed',
+          body: `${displayName} is ready to use.`,
+          tag: `global-task:download:${modelName}:completed`,
+          fallbackToToast: false,
+        });
+      } else if (isError) {
+        void notify({
+          kind: 'error',
+          title: 'Model download failed',
+          body: progress.error || `${displayName} download failed.`,
+          tag: `global-task:download:${modelName}:failed`,
+          fallbackToToast: false,
+        });
+      }
     },
-    [clearPolling, displayName, formatBytes, onComplete, onError],
+    [clearPolling, displayName, formatBytes, modelName, notify, onComplete, onError],
   );
 
   useEffect(() => {

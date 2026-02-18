@@ -61,10 +61,20 @@ export interface PlatformMetadata {
   isTauri: boolean;
 }
 
+export type NotificationPermissionState = 'granted' | 'denied' | 'default';
+
+export interface PlatformNotifications {
+  isSupported(): boolean;
+  getPermission(): NotificationPermissionState;
+  requestPermission(): Promise<NotificationPermissionState>;
+  send(title: string, options?: { body?: string; tag?: string }): Promise<void>;
+}
+
 export interface Platform {
   filesystem: PlatformFilesystem;
   updater: PlatformUpdater;
   audio: PlatformAudio;
   lifecycle: PlatformLifecycle;
   metadata: PlatformMetadata;
+  notifications: PlatformNotifications;
 }

@@ -4,6 +4,7 @@ import { tauriUpdater } from './updater';
 import { tauriAudio } from './audio';
 import { tauriLifecycle } from './lifecycle';
 import { tauriMetadata } from './metadata';
+import { tauriNotifications } from './notifications';
 
 export const tauriPlatform: Platform = {
   filesystem: tauriFilesystem,
@@ -11,4 +12,5 @@ export const tauriPlatform: Platform = {
   audio: tauriAudio,
   lifecycle: tauriLifecycle,
   metadata: tauriMetadata,
+  notifications: tauriNotifications,
 };

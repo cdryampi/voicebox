@@ -31,6 +31,8 @@ import type {
   StoryRenderJobResponse,
   StoryRenderStatusResponse,
   StoryResponse,
+  StudioDirectorSuggestionsRequest,
+  StudioDirectorSuggestionsResponse,
   StudioDraftCreateRequest,
   StudioDraftDetailResponse,
   StudioDraftLinesDeleteRequest,
@@ -807,6 +809,15 @@ class ApiClient {
 
   async createStudioDraft(data: StudioDraftCreateRequest): Promise<StudioDraftResponse> {
     return this.request<StudioDraftResponse>('/studio/drafts', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  }
+
+  async getStudioDirectorSuggestions(
+    data: StudioDirectorSuggestionsRequest,
+  ): Promise<StudioDirectorSuggestionsResponse> {
+    return this.request<StudioDirectorSuggestionsResponse>('/studio/director/suggestions', {
       method: 'POST',
       body: JSON.stringify(data),
     });

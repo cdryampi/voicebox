@@ -288,6 +288,131 @@ def compose_story_lines_with_groq(
     raise GroqAPIError(last_error)
 
 
+def compose_studio_director_suggestions_with_groq(
+    settings: BackendSettings,
+    *,
+    character_description: str,
+    story_name_hint: Optional[str],
+    mode: str,
+    language: str,
+    target_cards: int,
+    model: Optional[str] = None,
+) -> list[dict[str, Any]]:
+    """
+    Build four short Story Director presets from a single character description.
+    """
+    system = (
+        "You are a story director assistant for voice roleplay workflows. "
+        "Return strict JSON only with exactly four distinct ideas."
+    )
+    user = (
+        f"Character description:\n{character_description.strip()}\n\n"
+        f"Story name hint: {(story_name_hint or '').strip() or '(none)'}\n"
+        f"Mode: {mode}\n"
+        f"Language: {language}\n"
+        f"Target cards: {target_cards}\n\n"
+        "Create 4 different short-story presets. Keep them practical for TTS card generation.\n"
+        "Each preset must include:\n"
+        "- title\n"
+        "- description\n"
+        "- prompt\n"
+        "- preview_outline (2 to 4 bullets)\n\n"
+        "Output JSON schema:\n"
+        "{\n"
+        '  "suggestions": [\n'
+        "    {\n"
+        '      "title": "short title",\n'
+        '      "description": "short summary",\n'
+        '      "prompt": "director prompt for generating cards",\n'
+        '      "preview_outline": ["bullet 1", "bullet 2"]\n'
+        "    }\n"
+        "  ]\n"
+        "}\n"
+    )
+
+    max_tokens = 2400
+    last_error = "Unknown Groq suggestions error"
+
+    for attempt in range(2):
+        retry_extra = ""
+        if attempt == 1:
+            retry_extra = (
+                "\nIMPORTANT RETRY RULES:\n"
+                "- Return valid JSON object.\n"
+                "- Include exactly 4 suggestions.\n"
+                "- Keep preview_outline between 2 and 4 bullets.\n"
+            )
+
+        content = call_groq_chat(
+            settings,
+            messages=[
+                {"role": "system", "content": system},
+                {"role": "user", "content": f"{user}{retry_extra}"},
+            ],
+            model=model,
+            temperature=0.45 if attempt == 0 else 0.3,
+            max_tokens=max_tokens,
+            response_format={"type": "json_object"},
+        )
+
+        parsed = _extract_json_payload(content)
+        if not isinstance(parsed, dict):
+            last_error = "Groq suggestions response is not a JSON object"
+            continue
+
+        raw_suggestions = parsed.get("suggestions") or parsed.get("ideas") or parsed.get("items")
+        if not isinstance(raw_suggestions, list):
+            last_error = "Groq suggestions JSON does not include a valid suggestions array"
+            continue
+
+        normalized: list[dict[str, Any]] = []
+        for raw in raw_suggestions:
+            if not isinstance(raw, dict):
+                continue
+
+            title = str(raw.get("title", "")).strip()
+            prompt = str(raw.get("prompt", "")).strip()
+            description = str(raw.get("description", "")).strip()[:500] or None
+            outline_raw = raw.get("preview_outline") or raw.get("outline") or []
+
+            outline: list[str] = []
+            if isinstance(outline_raw, list):
+                for item in outline_raw:
+                    text = str(item).strip()
+                    if text:
+                        outline.append(text[:180])
+            elif isinstance(outline_raw, str):
+                for chunk in outline_raw.split("\n"):
+                    text = chunk.strip("-* ").strip()
+                    if text:
+                        outline.append(text[:180])
+
+            if len(outline) < 2:
+                seed = description or prompt
+                fragments = [part.strip() for part in seed.split(".") if part.strip()]
+                outline = fragments[:2]
+            outline = outline[:4]
+
+            if not title or not prompt or len(outline) < 2:
+                continue
+
+            normalized.append(
+                {
+                    "title": title[:100],
+                    "description": description,
+                    "prompt": prompt[:4000],
+                    "preview_outline": outline,
+                }
+            )
+
+        if len(normalized) >= 4:
+            return normalized[:4]
+
+        last_error = f"Groq returned {len(normalized)} valid suggestions (expected 4)"
+
+    raise GroqAPIError(last_error)
+
+
 def maybe_generate_emotion_instruction_with_groq(
     settings: BackendSettings,
     *,

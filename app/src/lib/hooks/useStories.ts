@@ -10,6 +10,7 @@ import type {
   StoryItemSplit,
   StoryItemTrim,
   StudioDraftCreateRequest,
+  StudioDirectorSuggestionsRequest,
   StudioDraftLinesDeleteRequest,
   StudioDraftLinesUpdateRequest,
 } from '@/lib/api/types';
@@ -278,6 +279,13 @@ export function useCreateStudioDraft() {
       queryClient.invalidateQueries({ queryKey: ['studio', 'drafts', result.draft_id] });
       queryClient.invalidateQueries({ queryKey: ['studio', 'drafts', 'list', result.story_id] });
     },
+  });
+}
+
+export function useStudioDirectorSuggestions() {
+  return useMutation({
+    mutationFn: (data: StudioDirectorSuggestionsRequest) =>
+      apiClient.getStudioDirectorSuggestions(data),
   });
 }
 

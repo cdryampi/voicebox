@@ -17,9 +17,15 @@ import {
 import { Textarea } from '@/components/ui/textarea';
 import { useToast } from '@/components/ui/use-toast';
 import { apiClient } from '@/lib/api/client';
-import type { EmotionType, StoryCharacterMapping, StudioDraftLineResponse } from '@/lib/api/types';
+import type {
+  EmotionType,
+  StoryCharacterMapping,
+  StudioDirectorSuggestion,
+  StudioDraftLineResponse,
+} from '@/lib/api/types';
 import { LANGUAGE_OPTIONS, type LanguageCode } from '@/lib/constants/languages';
 import { useProfiles } from '@/lib/hooks/useProfiles';
+import { useNotifier } from '@/lib/hooks/useNotifier';
 import {
   useCreateStory,
   useCreateStudioDraft,
@@ -27,6 +33,7 @@ import {
   useGenerateStudioLinePreview,
   useGroqModels,
   useRenderStudioDraftFinal,
+  useStudioDirectorSuggestions,
   useStoryRenderStatus,
   useStories,
   useStudioDraft,
@@ -82,6 +89,7 @@ function serializeDraftLines(lines: StudioDraftLineResponse[]): string {
 export function StudioTab() {
   const navigate = useNavigate();
   const { toast } = useToast();
+  const { notify } = useNotifier();
   const selectedStoryId = useStoryStore((state) => state.selectedStoryId);
   const setSelectedStoryId = useStoryStore((state) => state.setSelectedStoryId);
 
@@ -96,6 +104,7 @@ export function StudioTab() {
   const deleteStudioLines = useDeleteStudioDraftLines();
   const generatePreview = useGenerateStudioLinePreview();
   const renderFinal = useRenderStudioDraftFinal();
+  const directorSuggestions = useStudioDirectorSuggestions();
 
   const [draftId, setDraftId] = useState<string | null>(null);
   const {
@@ -116,6 +125,9 @@ export function StudioTab() {
   const [previewSeconds, setPreviewSeconds] = useState(5);
 
   const [newStoryName, setNewStoryName] = useState('');
+  const [characterDescription, setCharacterDescription] = useState('');
+  const [ideaSuggestions, setIdeaSuggestions] = useState<StudioDirectorSuggestion[]>([]);
+  const [selectedIdeaIndex, setSelectedIdeaIndex] = useState<number | null>(null);
 
   const [mappings, setMappings] = useState<StoryCharacterMapping[]>([
     {
@@ -136,6 +148,7 @@ export function StudioTab() {
   const [renderJobId, setRenderJobId] = useState<string | null>(null);
   const previewAudioUrlsRef = useRef<Map<string, string>>(new Map());
   const autosaveTimeoutRef = useRef<number | null>(null);
+  const lastRenderTerminalEventRef = useRef<string | null>(null);
 
   const { data: renderJobStatus } = useStoryRenderStatus(renderJobId);
 
@@ -167,6 +180,48 @@ export function StudioTab() {
     setName(selectedStory.name);
     setDescription(selectedStory.description ?? '');
   }, [selectedStory]);
+
+  useEffect(() => {
+    if (!renderJobStatus || !renderJobId) return;
+    if (
+      renderJobStatus.status !== 'completed' &&
+      renderJobStatus.status !== 'failed' &&
+      renderJobStatus.status !== 'partial_failed'
+    ) {
+      return;
+    }
+
+    const eventKey = `${renderJobStatus.job_id}:${renderJobStatus.status}:${renderJobStatus.processed_lines}`;
+    if (lastRenderTerminalEventRef.current === eventKey) {
+      return;
+    }
+    lastRenderTerminalEventRef.current = eventKey;
+
+    if (renderJobStatus.status === 'completed') {
+      void notify({
+        kind: 'completion',
+        title: 'Story render completed',
+        body: `Job ${renderJobStatus.job_id} finished successfully.`,
+        tag: `global-task:story_render:${renderJobStatus.job_id}:completed`,
+      });
+      return;
+    }
+
+    const errorSummary =
+      renderJobStatus.error_summary ||
+      (renderJobStatus.status === 'partial_failed'
+        ? 'Some lines failed. Review line errors before exporting.'
+        : 'Render failed. Check backend logs for details.');
+    void notify({
+      kind: 'error',
+      title:
+        renderJobStatus.status === 'partial_failed'
+          ? 'Story render completed with errors'
+          : 'Story render failed',
+      body: errorSummary,
+      tag: `global-task:story_render:${renderJobStatus.job_id}:failed`,
+    });
+  }, [notify, renderJobId, renderJobStatus]);
 
   useEffect(() => {
     if (!studioDrafts) return;
@@ -268,9 +323,15 @@ export function StudioTab() {
         m.character_name.trim() &&
         m.profile_id &&
         (m.description ?? '').trim() &&
-        (m.emotion_palette?.length ?? 0) > 0,
+      (m.emotion_palette?.length ?? 0) > 0,
     );
   }, [groqModels?.enabled, prompt, selectedModel, mappings]);
+
+  const canGenerateIdeas = useMemo(() => {
+    if (!groqModels?.enabled) return false;
+    if (!characterDescription.trim() || !selectedModel) return false;
+    return (profiles?.length ?? 0) > 0;
+  }, [characterDescription, groqModels?.enabled, profiles, selectedModel]);
 
   const updateMapping = (index: number, patch: Partial<StoryCharacterMapping>) => {
     setMappings((prev) => prev.map((m, i) => (i === index ? { ...m, ...patch } : m)));
@@ -326,6 +387,96 @@ export function StudioTab() {
     } catch (error) {
       toast({
         title: 'Could not create story',
+        description: error instanceof Error ? error.message : 'Unexpected error',
+        variant: 'destructive',
+      });
+    }
+  };
+
+  const applyDirectorSuggestion = (suggestion: StudioDirectorSuggestion, index: number) => {
+    const fallbackProfileId = profiles?.[0]?.id ?? '';
+    const nextMappings = suggestion.character_mappings.map((mapping, mappingIndex) => {
+      const hasProfile = (profiles ?? []).some((profile) => profile.id === mapping.profile_id);
+      const profileId = hasProfile ? mapping.profile_id : fallbackProfileId;
+      return {
+        ...mapping,
+        profile_id: profileId,
+        character_name: mapping.character_name || `Character ${mappingIndex + 1}`,
+        description: mapping.description || '',
+        emotion_palette:
+          mapping.emotion_palette && mapping.emotion_palette.length > 0
+            ? mapping.emotion_palette
+            : ['neutral', 'happy', 'sad', 'angry', 'fearful', 'surprised', 'calm'],
+        default_emotion: mapping.default_emotion || 'neutral',
+        default_emotion_intensity: clamp01(mapping.default_emotion_intensity ?? 0.5),
+        default_track: mapping.default_track ?? mappingIndex,
+      };
+    });
+
+    setName(suggestion.title);
+    setDescription(suggestion.description ?? '');
+    setPrompt(suggestion.prompt);
+    setMode(suggestion.mode);
+    setLanguage(suggestion.language);
+    if (suggestion.model_size) {
+      setSelectedModelSize(suggestion.model_size);
+    }
+    setMappings(nextMappings);
+    setMaxLines(clampLimits(suggestion.limits.max_lines, 1, 80, 20));
+    setMaxCharsPerLine(clampLimits(suggestion.limits.max_chars_per_line, 20, 1500, 300));
+    setPreviewSeconds(clampLimits(suggestion.limits.preview_seconds, 1, 15, 5));
+    setSelectedIdeaIndex(index);
+    toast({
+      title: 'Idea applied',
+      description: `"${suggestion.title}" has filled the Studio form.`,
+    });
+  };
+
+  const handleGenerateIdeas = async () => {
+    if (!characterDescription.trim()) {
+      toast({
+        title: 'Character description required',
+        description: 'Add a character description to generate idea presets.',
+        variant: 'destructive',
+      });
+      return;
+    }
+    if (!selectedModel) {
+      toast({
+        title: 'Model required',
+        description: 'Select a Groq model first.',
+        variant: 'destructive',
+      });
+      return;
+    }
+    if (!profiles?.length) {
+      toast({
+        title: 'No voice profiles available',
+        description: 'Create at least one voice profile before generating ideas.',
+        variant: 'destructive',
+      });
+      return;
+    }
+
+    try {
+      const response = await directorSuggestions.mutateAsync({
+        character_description: characterDescription.trim(),
+        story_name_hint: name.trim() || undefined,
+        mode,
+        language,
+        llm_model: selectedModel,
+        model_size: selectedModelSize,
+        target_cards: 8,
+      });
+      setIdeaSuggestions(response.suggestions);
+      setSelectedIdeaIndex(null);
+      toast({
+        title: 'Ideas generated',
+        description: 'Choose one of the 4 presets to autofill the Studio form.',
+      });
+    } catch (error) {
+      toast({
+        title: 'Idea generation failed',
         description: error instanceof Error ? error.message : 'Unexpected error',
         variant: 'destructive',
       });
@@ -782,6 +933,74 @@ export function StudioTab() {
       </div>
 
       <div className="flex-1 min-h-0 flex flex-col gap-4 overflow-hidden">
+        <Card>
+          <CardHeader className="pb-3">
+            <CardTitle className="text-base flex items-center gap-2">
+              <Wand2 className="h-4 w-4" />
+              Idea Generator
+            </CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-3">
+            <Textarea
+              value={characterDescription}
+              onChange={(e) => setCharacterDescription(e.target.value)}
+              placeholder="Describe your main character. Example: age, personality, fears, desires, speaking style, emotional tone..."
+              className="min-h-[95px]"
+            />
+            <div className="flex items-center justify-between gap-3">
+              <p className="text-xs text-muted-foreground">
+                Generate 4 short story presets to auto-fill Studio Director.
+              </p>
+              <Button
+                type="button"
+                variant="outline"
+                onClick={handleGenerateIdeas}
+                disabled={!canGenerateIdeas || directorSuggestions.isPending}
+              >
+                <Sparkles className="h-4 w-4 mr-2" />
+                {directorSuggestions.isPending ? 'Generating 4 ideas...' : 'Generate 4 Ideas'}
+              </Button>
+            </div>
+
+            {!!ideaSuggestions.length && (
+              <div className="grid grid-cols-1 xl:grid-cols-2 gap-3">
+                {ideaSuggestions.map((idea, index) => (
+                  <Card
+                    key={`${idea.title}-${index}`}
+                    className={
+                      selectedIdeaIndex === index ? 'border-primary ring-1 ring-primary/40' : ''
+                    }
+                  >
+                    <CardContent className="pt-4 space-y-2">
+                      <div className="flex items-center justify-between gap-2">
+                        <div className="text-sm font-semibold truncate">{idea.title}</div>
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant={selectedIdeaIndex === index ? 'default' : 'outline'}
+                          onClick={() => applyDirectorSuggestion(idea, index)}
+                        >
+                          Use this idea
+                        </Button>
+                      </div>
+                      {idea.description && (
+                        <p className="text-xs text-muted-foreground line-clamp-2">{idea.description}</p>
+                      )}
+                      <ul className="text-xs text-muted-foreground space-y-1">
+                        {idea.preview_outline.slice(0, 4).map((line, itemIndex) => (
+                          <li key={`${index}-outline-${itemIndex}`} className="line-clamp-2">
+                            • {line}
+                          </li>
+                        ))}
+                      </ul>
+                    </CardContent>
+                  </Card>
+                ))}
+              </div>
+            )}
+          </CardContent>
+        </Card>
+
         <Card>
           <CardHeader className="pb-3">
             <CardTitle className="text-base flex items-center gap-2">

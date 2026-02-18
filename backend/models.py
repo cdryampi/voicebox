@@ -573,3 +573,32 @@ class StudioRenderFinalResponse(BaseModel):
     story_id: str
     status: str
     total_lines: int
+
+
+class StudioDirectorSuggestionsRequest(BaseModel):
+    """Generate short Story Director suggestions from a character description."""
+    character_description: str = Field(..., min_length=10, max_length=4000)
+    story_name_hint: Optional[str] = Field(default=None, min_length=1, max_length=100)
+    mode: Literal["novela", "roleplay"] = "roleplay"
+    language: str = Field(default="en", pattern="^(zh|en|ja|ko|de|fr|ru|pt|es|it)$")
+    llm_model: Optional[str] = Field(default=None, max_length=120)
+    model_size: Optional[str] = Field(default=None, pattern="^(1\\.7B|0\\.6B)$")
+    target_cards: int = Field(default=8, ge=4, le=20)
+
+
+class StudioDirectorSuggestion(BaseModel):
+    """Single Story Director preset suggestion."""
+    title: str = Field(..., min_length=1, max_length=100)
+    description: Optional[str] = Field(default=None, max_length=500)
+    prompt: str = Field(..., min_length=5, max_length=4000)
+    mode: Literal["novela", "roleplay"]
+    language: str
+    model_size: Optional[str] = None
+    limits: StudioLimits
+    character_mappings: List[StoryCharacterMapping] = Field(..., min_length=1, max_length=10)
+    preview_outline: List[str] = Field(..., min_length=2, max_length=4)
+
+
+class StudioDirectorSuggestionsResponse(BaseModel):
+    """Response containing exactly four Story Director preset suggestions."""
+    suggestions: List[StudioDirectorSuggestion] = Field(..., min_length=4, max_length=4)

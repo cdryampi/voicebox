@@ -4,7 +4,12 @@ from backend.auth import is_request_authorized
 from backend.models import (
     CapabilitiesResponse,
     ModelDefaultsUpdateRequest,
+    StudioDirectorSuggestion,
+    StudioDirectorSuggestionsRequest,
+    StudioDirectorSuggestionsResponse,
     StoryRenderFromHistoryRequest,
+    StoryCharacterMapping,
+    StudioLimits,
 )
 from backend.settings import BackendSettings
 from backend.stories import build_emotion_instruction
@@ -88,3 +93,45 @@ def test_model_defaults_payload_validation() -> None:
         default_whisper_model_size="small",
     )
     assert payload.default_tts_model_size == "0.6B"
+
+
+def test_studio_director_request_validates_target_cards_bounds() -> None:
+    try:
+        StudioDirectorSuggestionsRequest(
+            character_description="A character with enough detail to pass validation.",
+            mode="roleplay",
+            language="es",
+            target_cards=2,
+        )
+        assert False, "Expected validation to fail"
+    except ValidationError as exc:
+        assert "target_cards" in str(exc)
+
+
+def test_studio_director_response_requires_four_suggestions() -> None:
+    base_suggestion = StudioDirectorSuggestion(
+        title="Idea",
+        description="Short idea",
+        prompt="Generate a short story with emotional progression.",
+        mode="roleplay",
+        language="es",
+        model_size="0.6B",
+        limits=StudioLimits(max_lines=8, max_chars_per_line=300, preview_seconds=5),
+        character_mappings=[
+            StoryCharacterMapping(
+                character_name="Protagonista",
+                profile_id="profile-1",
+                description="Lead character.",
+                emotion_palette=["neutral", "happy"],
+                default_emotion="neutral",
+                default_emotion_intensity=0.5,
+                default_track=0,
+            )
+        ],
+        preview_outline=["Intro", "Conflict"],
+    )
+    try:
+        StudioDirectorSuggestionsResponse(suggestions=[base_suggestion] * 3)
+        assert False, "Expected validation to fail"
+    except ValidationError as exc:
+        assert "suggestions" in str(exc)

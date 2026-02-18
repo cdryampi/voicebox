@@ -23,6 +23,9 @@ from .models import (
     EmotionType,
     StoryCharacterMapping,
     StoryLineSpec,
+    StudioDirectorSuggestion,
+    StudioDirectorSuggestionsRequest,
+    StudioDirectorSuggestionsResponse,
     StudioDraftListItem,
     StoryRenderFromHistoryRequest,
     StudioDraftCreateRequest,
@@ -37,7 +40,12 @@ from .models import (
 )
 from .settings import load_settings
 from .utils.audio import save_audio
-from .utils.groq import GroqAPIError, compose_story_lines_with_groq, list_available_groq_models
+from .utils.groq import (
+    GroqAPIError,
+    compose_story_lines_with_groq,
+    compose_studio_director_suggestions_with_groq,
+    list_available_groq_models,
+)
 
 
 _ALLOWED_EMOTIONS: set[str] = {
@@ -59,6 +67,8 @@ _EMOTION_GUIDANCE = {
     "surprised": "reactive, bright, and sudden",
     "calm": "slow, grounded, and soothing",
 }
+
+_SUPPORTED_LANGUAGES = {"zh", "en", "ja", "ko", "de", "fr", "ru", "pt", "es", "it"}
 
 
 def _get_stories_output_dir() -> Path:
@@ -201,6 +211,211 @@ def _draft_to_detail_response(draft: DBStudioDraft, lines: List[DBStudioDraftLin
         updated_at=draft.updated_at,
         lines=[_line_to_response(draft.id, line) for line in lines],
     )
+
+
+def _sanitize_outline(
+    raw_outline: object,
+    *,
+    fallback_prompt: str,
+    fallback_description: Optional[str],
+) -> List[str]:
+    outline: List[str] = []
+    if isinstance(raw_outline, list):
+        for item in raw_outline:
+            text = str(item).strip()
+            if text:
+                outline.append(text[:180])
+    elif isinstance(raw_outline, str):
+        for chunk in raw_outline.split("\n"):
+            text = chunk.strip("-* ").strip()
+            if text:
+                outline.append(text[:180])
+
+    if len(outline) >= 2:
+        return outline[:4]
+
+    fallback_source = fallback_description or fallback_prompt
+    fragments = [
+        part.strip()[:180]
+        for part in fallback_source.split(".")
+        if part.strip()
+    ]
+    if len(fragments) >= 2:
+        return fragments[:4]
+
+    short_prompt = fallback_prompt.strip()[:180]
+    if short_prompt:
+        return [short_prompt, "Emotional arc across short cards"]
+    return ["Short story arc", "Emotion-focused card sequence"]
+
+
+def _safe_int(value: object, default: int) -> int:
+    try:
+        return int(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return default
+
+
+def _default_character_mappings(
+    *,
+    profile_id: str,
+    character_description: str,
+    protagonist_name: str = "Protagonista",
+    narrator_name: str = "Narrador",
+    protagonist_description: Optional[str] = None,
+    narrator_description: Optional[str] = None,
+) -> List[StoryCharacterMapping]:
+    protagonist_label = protagonist_name.strip()[:100] or "Protagonista"
+    narrator_label = narrator_name.strip()[:100] or "Narrador"
+    if narrator_label == protagonist_label:
+        narrator_label = "Narrador"
+
+    protagonist_desc = (
+        (protagonist_description or "").strip() or character_description.strip()
+    )[:500]
+    narrator_desc = (
+        (narrator_description or "").strip()
+        or "Narrador observador y coherente, enfocado en ritmo, contexto y continuidad emocional."
+    )[:500]
+
+    emotions: List[EmotionType] = [
+        "neutral",
+        "happy",
+        "sad",
+        "angry",
+        "fearful",
+        "surprised",
+        "calm",
+    ]
+    return [
+        StoryCharacterMapping(
+            character_name=protagonist_label,
+            profile_id=profile_id,
+            description=protagonist_desc,
+            emotion_palette=emotions,
+            default_emotion="neutral",
+            default_emotion_intensity=0.6,
+            default_track=0,
+        ),
+        StoryCharacterMapping(
+            character_name=narrator_label,
+            profile_id=profile_id,
+            description=narrator_desc,
+            emotion_palette=emotions,
+            default_emotion="calm",
+            default_emotion_intensity=0.4,
+            default_track=1,
+        ),
+    ]
+
+
+async def generate_studio_director_suggestions(
+    data: StudioDirectorSuggestionsRequest,
+    db: Session,
+) -> StudioDirectorSuggestionsResponse:
+    settings = load_settings()
+    if not settings.groq_api_key:
+        raise ValueError("GROQ_API_KEY is not configured. Add it to .env or environment variables.")
+
+    description = data.character_description.strip()
+    if not description:
+        raise ValueError("character_description is required")
+
+    llm_model = data.llm_model or settings.groq_model
+    allowed_models = list_available_groq_models(settings)
+    if llm_model not in allowed_models:
+        raise ValueError(f"Unknown llm_model '{llm_model}'. Use one of /llm/groq/models.")
+
+    first_profile = (
+        db.query(DBVoiceProfile)
+        .order_by(DBVoiceProfile.created_at.asc())
+        .first()
+    )
+    if not first_profile:
+        raise ValueError("need at least one voice profile")
+
+    target_cards = min(20, max(4, int(data.target_cards)))
+    try:
+        raw_suggestions = compose_studio_director_suggestions_with_groq(
+            settings,
+            character_description=description,
+            story_name_hint=data.story_name_hint,
+            mode=data.mode,
+            language=data.language,
+            target_cards=target_cards,
+            model=llm_model,
+        )
+    except GroqAPIError as e:
+        raise ValueError(f"Groq failed to generate story director suggestions: {e}") from e
+
+    suggestions: List[StudioDirectorSuggestion] = []
+    for idx, raw in enumerate(raw_suggestions):
+        if len(suggestions) >= 4:
+            break
+        if not isinstance(raw, dict):
+            continue
+
+        title = str(raw.get("title", "")).strip()[:100]
+        prompt = str(raw.get("prompt", "")).strip()[:4000]
+        description_text = str(raw.get("description", "")).strip()[:500] or None
+        if not title:
+            title = f"Idea {idx + 1}"
+        if not prompt:
+            continue
+
+        raw_mode = str(raw.get("mode", data.mode)).strip().lower()
+        mode = raw_mode if raw_mode in {"novela", "roleplay"} else data.mode
+
+        raw_language = str(raw.get("language", data.language)).strip().lower()
+        language = raw_language if raw_language in _SUPPORTED_LANGUAGES else data.language
+
+        raw_model_size = str(raw.get("model_size", data.model_size or "")).strip()
+        model_size = raw_model_size if raw_model_size in {"0.6B", "1.7B"} else data.model_size
+
+        raw_limits = raw.get("limits") if isinstance(raw.get("limits"), dict) else {}
+        limits = StudioLimits(
+            max_lines=min(80, max(1, _safe_int(raw_limits.get("max_lines"), target_cards))),
+            max_chars_per_line=min(
+                1500, max(20, _safe_int(raw_limits.get("max_chars_per_line"), 300))
+            ),
+            preview_seconds=min(15, max(1, _safe_int(raw_limits.get("preview_seconds"), 5))),
+        )
+
+        outline = _sanitize_outline(
+            raw.get("preview_outline"),
+            fallback_prompt=prompt,
+            fallback_description=description_text,
+        )
+        if len(outline) < 2:
+            continue
+
+        character_mappings = _default_character_mappings(
+            profile_id=first_profile.id,
+            character_description=description,
+            protagonist_name=str(raw.get("protagonist_name", "Protagonista")),
+            narrator_name=str(raw.get("narrator_name", "Narrador")),
+            protagonist_description=str(raw.get("protagonist_description", "")) or None,
+            narrator_description=str(raw.get("narrator_description", "")) or None,
+        )
+
+        suggestions.append(
+            StudioDirectorSuggestion(
+                title=title,
+                description=description_text,
+                prompt=prompt,
+                mode=mode,  # type: ignore[arg-type]
+                language=language,
+                model_size=model_size,
+                limits=limits,
+                character_mappings=character_mappings,
+                preview_outline=outline[:4],
+            )
+        )
+
+    if len(suggestions) < 4:
+        raise ValueError("Groq did not return 4 valid suggestions. Try a different model or prompt.")
+
+    return StudioDirectorSuggestionsResponse(suggestions=suggestions[:4])
 
 
 async def create_studio_draft(

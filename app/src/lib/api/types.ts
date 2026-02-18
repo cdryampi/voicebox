@@ -422,3 +422,29 @@ export interface StudioRenderFinalResponse {
   status: string;
   total_lines: number;
 }
+
+export interface StudioDirectorSuggestionsRequest {
+  character_description: string;
+  story_name_hint?: string;
+  mode: 'novela' | 'roleplay';
+  language: LanguageCode;
+  llm_model?: string;
+  model_size?: '1.7B' | '0.6B';
+  target_cards?: number;
+}
+
+export interface StudioDirectorSuggestion {
+  title: string;
+  description?: string;
+  prompt: string;
+  mode: 'novela' | 'roleplay';
+  language: LanguageCode;
+  model_size?: '1.7B' | '0.6B';
+  limits: StudioLimits;
+  character_mappings: StoryCharacterMapping[];
+  preview_outline: string[];
+}
+
+export interface StudioDirectorSuggestionsResponse {
+  suggestions: StudioDirectorSuggestion[];
+}
