@@ -72,6 +72,11 @@ function clampCharacters(value: number): number {
   return Math.min(10, Math.max(1, Math.round(value)));
 }
 
+function limitCardText(text: string, maxChars: number): string {
+  if (text.length <= maxChars) return text;
+  return text.slice(0, maxChars);
+}
+
 function serializeDraftLines(lines: StudioDraftLineResponse[]): string {
   return JSON.stringify(
     [...lines]
@@ -202,6 +207,27 @@ export function StudioTab() {
     setName(selectedStory.name);
     setDescription(selectedStory.description ?? '');
   }, [selectedStory]);
+
+  useEffect(() => {
+    const limit = clampLimits(maxCharsPerLine, 20, 1500, 300);
+    setLines((prev) => {
+      let changed = false;
+      const next = prev.map((line) => {
+        if (line.text.length <= limit) return line;
+        changed = true;
+        return {
+          ...line,
+          text: limitCardText(line.text, limit),
+          truncated: true,
+          preview_status: 'idle',
+          preview_audio_url: undefined,
+          preview_duration: undefined,
+          preview_error: undefined,
+        };
+      });
+      return changed ? next : prev;
+    });
+  }, [maxCharsPerLine]);
 
   useEffect(() => {
     if (!renderJobStatus || !renderJobId) return;
@@ -488,7 +514,8 @@ export function StudioTab() {
         language,
         llm_model: selectedIdeaModel,
         model_size: selectedModelSize,
-        target_cards: 8,
+        target_cards: clampLimits(maxLines, 4, 20, 8),
+        max_chars_per_card: clampLimits(maxCharsPerLine, 20, 1500, 300),
       });
       setIdeaSuggestions(response.suggestions);
       setSelectedIdeaIndex(null);
@@ -689,17 +716,26 @@ export function StudioTab() {
   }, [activeLineId, draftId, lines, modelOpsBusy]);
 
   const updateLine = (lineId: string, patch: Partial<StudioDraftLineResponse>) => {
+    const maxChars = clampLimits(maxCharsPerLine, 20, 1500, 300);
+    const normalizedPatch =
+      patch.text !== undefined
+        ? {
+            ...patch,
+            text: limitCardText(patch.text, maxChars),
+            truncated: patch.text.length > maxChars,
+          }
+        : patch;
     setLines((prev) =>
       prev.map((line) => {
         if (line.id !== lineId) return line;
         const invalidatePreview =
-          patch.text !== undefined ||
-          patch.character_name !== undefined ||
-          patch.emotion !== undefined ||
-          patch.emotion_intensity !== undefined;
+          normalizedPatch.text !== undefined ||
+          normalizedPatch.character_name !== undefined ||
+          normalizedPatch.emotion !== undefined ||
+          normalizedPatch.emotion_intensity !== undefined;
         return {
           ...line,
-          ...patch,
+          ...normalizedPatch,
           ...(invalidatePreview
             ? {
                 preview_status: 'idle',
@@ -1341,7 +1377,10 @@ export function StudioTab() {
 
                   <Textarea
                     value={line.text}
-                    onChange={(e) => updateLine(line.id, { text: e.target.value })}
+                    onChange={(e) =>
+                      updateLine(line.id, { text: limitCardText(e.target.value, charLimit) })
+                    }
+                    maxLength={charLimit}
                     className="min-h-[90px]"
                   />
 

@@ -368,6 +368,41 @@ def _safe_int(value: object, default: int) -> int:
         return default
 
 
+def _ensure_director_prompt_constraints(
+    *,
+    prompt: str,
+    mode: str,
+    language: str,
+    max_lines: int,
+    max_chars_per_line: int,
+) -> str:
+    """Append hard generation constraints when missing from prompt."""
+    clean = (prompt or "").strip()
+    if not clean:
+        return clean
+
+    lower = clean.lower()
+    needs_lines = "max cards" not in lower and "max_lines" not in lower and "target lines" not in lower
+    needs_chars = "max chars" not in lower and "max_chars_per_line" not in lower
+    needs_mode = "mode:" not in lower
+    needs_language = "language:" not in lower
+
+    constraints: List[str] = []
+    if needs_mode:
+        constraints.append(f"- Mode: {mode}")
+    if needs_language:
+        constraints.append(f"- Language: {language}")
+    if needs_lines:
+        constraints.append(f"- Max cards/lines: {max_lines}")
+    if needs_chars:
+        constraints.append(f"- Max chars per card: {max_chars_per_line}")
+
+    constraints.append("- Each card must be a complete beat (1-3 sentences) with concrete scene detail.")
+    constraints.append("- Avoid generic filler; keep emotional progression coherent across cards.")
+
+    return f"{clean}\n\nHard constraints:\n" + "\n".join(constraints)
+
+
 def _default_character_mappings(
     *,
     profile_id: str,
@@ -447,6 +482,7 @@ async def generate_studio_director_suggestions(
         raise ValueError("need at least one voice profile")
 
     target_cards = min(20, max(4, int(data.target_cards)))
+    max_chars_per_card = min(1500, max(20, int(data.max_chars_per_card)))
     try:
         raw_suggestions = compose_studio_director_suggestions_with_groq(
             settings,
@@ -455,6 +491,7 @@ async def generate_studio_director_suggestions(
             mode=data.mode,
             language=data.language,
             target_cards=target_cards,
+            max_chars_per_card=max_chars_per_card,
             model=llm_model,
         )
     except GroqAPIError as e:
@@ -488,10 +525,17 @@ async def generate_studio_director_suggestions(
         limits = StudioLimits(
             max_lines=min(80, max(1, _safe_int(raw_limits.get("max_lines"), target_cards))),
             max_chars_per_line=min(
-                1500, max(20, _safe_int(raw_limits.get("max_chars_per_line"), 300))
+                1500, max(20, _safe_int(raw_limits.get("max_chars_per_line"), max_chars_per_card))
             ),
             preview_seconds=min(15, max(1, _safe_int(raw_limits.get("preview_seconds"), 5))),
         )
+        prompt = _ensure_director_prompt_constraints(
+            prompt=prompt,
+            mode=mode,
+            language=language,
+            max_lines=limits.max_lines,
+            max_chars_per_line=limits.max_chars_per_line,
+        )[:4000]
 
         outline = _sanitize_outline(
             raw.get("preview_outline"),
@@ -595,9 +639,16 @@ async def create_studio_draft(
         for m in data.character_mappings
     }
     try:
+        constrained_prompt = _ensure_director_prompt_constraints(
+            prompt=data.prompt,
+            mode=data.mode,
+            language=data.language,
+            max_lines=limits.max_lines,
+            max_chars_per_line=limits.max_chars_per_line,
+        )
         composed_lines = compose_story_lines_with_groq(
             settings,
-            prompt=data.prompt,
+            prompt=constrained_prompt,
             mode=data.mode,
             language=data.language,
             characters=character_names,

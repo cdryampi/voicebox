@@ -328,9 +328,17 @@ def compose_story_lines_with_groq(
         "You create audio drama scripts. "
         "Return strict JSON only, no markdown, no extra text."
     )
+    max_chars_limit = max(20, int(max_chars_per_line)) if max_chars_per_line is not None else None
+    preferred_min_chars = max(24, int(max_chars_limit * 0.55)) if max_chars_limit else None
     max_chars_instruction = (
-        f"Max chars per line: {max(20, int(max_chars_per_line))}\n"
-        if max_chars_per_line is not None
+        f"Max chars per line: {max_chars_limit}\n"
+        if max_chars_limit is not None
+        else ""
+    )
+    pacing_instruction = (
+        f"Preferred length per line: {preferred_min_chars}-{max_chars_limit} characters "
+        "(avoid overly short one-liners unless intentional).\n"
+        if max_chars_limit is not None and preferred_min_chars is not None
         else ""
     )
     user = (
@@ -341,7 +349,12 @@ def compose_story_lines_with_groq(
         "IMPORTANT: For each line, emotion must be chosen from the character's allowed_emotions.\n"
         f"Target lines: {target_lines}\n"
         f"{max_chars_instruction}"
+        f"{pacing_instruction}"
         f"Prompt: {prompt}\n\n"
+        "Quality requirements:\n"
+        "- Each line must be a complete beat (1 to 3 sentences).\n"
+        "- Keep dialogue concrete and scene-specific, avoid generic filler.\n"
+        "- Respect language and mode exactly.\n\n"
         "Output JSON schema:\n"
         "{\n"
         '  "lines": [\n'
@@ -355,23 +368,28 @@ def compose_story_lines_with_groq(
         "}\n"
     )
 
-    max_tokens = min(7000, max(1400, target_lines * 220))
+    max_tokens = min(7000, max(1600, target_lines * 240))
     last_error = "Unknown Groq compose error"
+    retry_feedback = ""
+    min_required_lines = max(2, int(target_lines * 0.7))
 
-    for attempt in range(2):
+    for attempt in range(3):
         extra = ""
-        if attempt == 1:
+        if attempt > 0:
             retry_line_rule = (
-                f"- Keep each text line <= {max(20, int(max_chars_per_line))} characters.\n"
-                if max_chars_per_line is not None
+                f"- Keep every text line <= {max_chars_limit} characters.\n"
+                if max_chars_limit is not None
                 else ""
             )
             extra = (
                 "\nIMPORTANT RETRY RULES:\n"
                 "- Output must be valid JSON.\n"
                 f"{retry_line_rule}"
+                "- Return a `lines` array with enough entries to match target_lines.\n"
                 "- Do not add explanations.\n"
             )
+            if retry_feedback:
+                extra += f"\nPrevious output issues to fix:\n{retry_feedback}\n"
 
         content = call_groq_chat(
             settings,
@@ -380,8 +398,8 @@ def compose_story_lines_with_groq(
                 {"role": "user", "content": f"{user}{extra}"},
             ],
             model=model,
-            temperature=0.3 if attempt == 0 else 0.2,
-            max_tokens=max_tokens + (1000 if attempt == 1 else 0),
+            temperature=0.3 if attempt == 0 else 0.18,
+            max_tokens=max_tokens + (1000 if attempt > 0 else 0),
             response_format={"type": "json_object"},
         )
 
@@ -401,10 +419,50 @@ def compose_story_lines_with_groq(
             last_error = "Groq JSON does not contain a valid 'lines' array"
             continue
 
-        normalized_lines = [line for line in lines if isinstance(line, dict)]
+        normalized_lines = [
+            line
+            for line in lines
+            if isinstance(line, dict) and str(line.get("text", "")).strip()
+        ]
         if not normalized_lines:
             last_error = "Groq JSON 'lines' array is empty or invalid"
             continue
+
+        if len(normalized_lines) < min_required_lines:
+            last_error = (
+                f"Groq returned too few lines ({len(normalized_lines)} < {min_required_lines})"
+            )
+            retry_feedback = last_error
+            continue
+
+        if max_chars_limit is not None:
+            too_long: list[str] = []
+            too_short: list[str] = []
+            for idx, line in enumerate(normalized_lines):
+                text_value = str(line.get("text", "")).strip()
+                text_len = len(text_value)
+                if text_len > max_chars_limit:
+                    too_long.append(f"#{idx + 1}={text_len}")
+                elif preferred_min_chars is not None and text_len < preferred_min_chars:
+                    too_short.append(f"#{idx + 1}={text_len}")
+
+            if too_long:
+                sample = ", ".join(too_long[:6])
+                last_error = f"Groq returned lines above max chars ({sample})"
+                retry_feedback = (
+                    f"Some lines exceeded max chars {max_chars_limit}: {sample}. "
+                    "Rewrite those lines to fit without losing meaning."
+                )
+                continue
+
+            if len(too_short) > max(2, int(len(normalized_lines) * 0.6)):
+                sample = ", ".join(too_short[:6])
+                last_error = "Groq returned too many short lines for the configured char budget"
+                retry_feedback = (
+                    f"Too many lines were shorter than {preferred_min_chars} chars: {sample}. "
+                    "Expand lines with richer, scene-specific detail."
+                )
+                continue
 
         return normalized_lines
 
@@ -419,6 +477,7 @@ def compose_studio_director_suggestions_with_groq(
     mode: str,
     language: str,
     target_cards: int,
+    max_chars_per_card: int,
     model: Optional[str] = None,
 ) -> list[dict[str, Any]]:
     """
@@ -434,12 +493,20 @@ def compose_studio_director_suggestions_with_groq(
         f"Mode: {mode}\n"
         f"Language: {language}\n"
         f"Target cards: {target_cards}\n\n"
+        f"Max chars per card: {max(20, int(max_chars_per_card))}\n\n"
         "Create 4 different short-story presets. Keep them practical for TTS card generation.\n"
         "Each preset must include:\n"
         "- title\n"
         "- description\n"
-        "- prompt\n"
+        "- prompt (specific, production-ready, with constraints)\n"
+        "- limits object with max_lines, max_chars_per_line, preview_seconds\n"
+        "- protagonist_name and narrator_name\n"
+        "- protagonist_description and narrator_description\n"
         "- preview_outline (2 to 4 bullets)\n\n"
+        "Prompt quality rules:\n"
+        "- Must explicitly mention emotional arc and scene progression.\n"
+        "- Must include hard constraints for cards count and max chars/card.\n"
+        "- Must avoid vague instructions like 'be creative'.\n\n"
         "Output JSON schema:\n"
         "{\n"
         '  "suggestions": [\n'
@@ -447,6 +514,11 @@ def compose_studio_director_suggestions_with_groq(
         '      "title": "short title",\n'
         '      "description": "short summary",\n'
         '      "prompt": "director prompt for generating cards",\n'
+        '      "limits": {"max_lines": 8, "max_chars_per_line": 300, "preview_seconds": 5},\n'
+        '      "protagonist_name": "Protagonista",\n'
+        '      "narrator_name": "Narrador",\n'
+        '      "protagonist_description": "personality and speaking style",\n'
+        '      "narrator_description": "narration style",\n'
         '      "preview_outline": ["bullet 1", "bullet 2"]\n'
         "    }\n"
         "  ]\n"
@@ -524,6 +596,13 @@ def compose_studio_director_suggestions_with_groq(
                     "title": title[:100],
                     "description": description,
                     "prompt": prompt[:4000],
+                    "limits": raw.get("limits"),
+                    "protagonist_name": str(raw.get("protagonist_name", "")).strip()[:100],
+                    "narrator_name": str(raw.get("narrator_name", "")).strip()[:100],
+                    "protagonist_description": str(
+                        raw.get("protagonist_description", "")
+                    ).strip()[:500],
+                    "narrator_description": str(raw.get("narrator_description", "")).strip()[:500],
                     "preview_outline": outline,
                 }
             )

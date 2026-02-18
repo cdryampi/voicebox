@@ -551,6 +551,7 @@ export interface StudioDirectorSuggestionsRequest {
   llm_model?: string;
   model_size?: '1.7B' | '0.6B';
   target_cards?: number;
+  max_chars_per_card?: number;
 }
 
 export interface StudioDirectorSuggestion {

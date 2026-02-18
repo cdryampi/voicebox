@@ -684,6 +684,7 @@ class StudioDirectorSuggestionsRequest(BaseModel):
     llm_model: Optional[str] = Field(default=None, max_length=120)
     model_size: Optional[str] = Field(default=None, pattern="^(1\\.7B|0\\.6B)$")
     target_cards: int = Field(default=8, ge=4, le=20)
+    max_chars_per_card: int = Field(default=300, ge=20, le=1500)
 
 
 class StudioDirectorSuggestion(BaseModel):
