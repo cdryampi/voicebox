@@ -33,6 +33,18 @@ _GROQ_MODELS_CACHE: dict[str, Any] = {
 }
 
 
+def _is_json_response_format_validation_error(status_code: int, message: str) -> bool:
+    if status_code != 400:
+        return False
+    lowered = (message or "").lower()
+    return (
+        "failed to validate json" in lowered
+        or "response_format" in lowered
+        or "json_object" in lowered
+        or "failed_generation" in lowered
+    )
+
+
 def _groq_headers(settings: BackendSettings) -> dict[str, str]:
     return {
         "Content-Type": "application/json",
@@ -211,54 +223,73 @@ def call_groq_chat(
         raise GroqAPIError("GROQ_API_KEY is not configured")
 
     target_model = model or settings.groq_model
-    payload = {
-        "model": target_model,
-        "messages": messages,
-        "temperature": temperature,
-        "max_tokens": max_tokens,
-    }
-    if response_format:
-        payload["response_format"] = response_format
+    # Some Groq models fail with 400 on response_format json_object.
+    # Fallback automatically to plain completion + manual JSON extraction upstream.
+    response_format_attempts = [response_format] if response_format else [None]
+    if response_format is not None:
+        response_format_attempts.append(None)
 
-    req = request.Request(
-        url="https://api.groq.com/openai/v1/chat/completions",
-        data=json.dumps(payload).encode("utf-8"),
-        headers=_groq_headers(settings),
-        method="POST",
-    )
+    last_error: Optional[Exception] = None
+    for fmt in response_format_attempts:
+        payload = {
+            "model": target_model,
+            "messages": messages,
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+        }
+        if fmt:
+            payload["response_format"] = fmt
 
-    try:
-        with request.urlopen(req, timeout=settings.groq_timeout_seconds) as resp:
-            body = json.loads(resp.read().decode("utf-8"))
-    except error.HTTPError as e:
+        req = request.Request(
+            url="https://api.groq.com/openai/v1/chat/completions",
+            data=json.dumps(payload).encode("utf-8"),
+            headers=_groq_headers(settings),
+            method="POST",
+        )
+
         try:
-            response_body = e.read().decode("utf-8", errors="replace")
-            parsed = json.loads(response_body)
-            api_message = (
-                parsed.get("error", {}).get("message")
-                or parsed.get("message")
-                or response_body[:300]
-            )
-        except Exception:
-            api_message = str(e)
-        hint = ""
-        if e.code in (401, 403):
-            hint = " Check GROQ_API_KEY, project permissions, and model access in Groq console."
-        elif e.code == 429:
-            hint = " Rate limit or quota exceeded; retry later or use another model."
-        raise GroqAPIError(f"Groq API HTTP {e.code}: {api_message}.{hint}") from e
-    except error.URLError as e:
-        raise GroqAPIError(f"Groq API network error: {e.reason}") from e
-    except json.JSONDecodeError as e:
-        raise GroqAPIError("Groq API returned invalid JSON payload") from e
+            with request.urlopen(req, timeout=settings.groq_timeout_seconds) as resp:
+                body = json.loads(resp.read().decode("utf-8"))
+        except error.HTTPError as e:
+            try:
+                response_body = e.read().decode("utf-8", errors="replace")
+                parsed = json.loads(response_body)
+                api_message = (
+                    parsed.get("error", {}).get("message")
+                    or parsed.get("message")
+                    or response_body[:300]
+                )
+            except Exception:
+                api_message = str(e)
 
-    try:
-        content = body["choices"][0]["message"]["content"]
-        if not isinstance(content, str) or not content.strip():
-            raise GroqAPIError("Groq API returned empty content")
-        return content.strip()
-    except (KeyError, IndexError, TypeError) as e:
-        raise GroqAPIError("Groq API response missing assistant content") from e
+            if fmt is not None and _is_json_response_format_validation_error(e.code, api_message):
+                last_error = GroqAPIError(
+                    f"Groq API HTTP {e.code}: {api_message}. Retrying without response_format."
+                )
+                continue
+
+            hint = ""
+            if e.code in (401, 403):
+                hint = " Check GROQ_API_KEY, project permissions, and model access in Groq console."
+            elif e.code == 429:
+                hint = " Rate limit or quota exceeded; retry later or use another model."
+            raise GroqAPIError(f"Groq API HTTP {e.code}: {api_message}.{hint}") from e
+        except error.URLError as e:
+            raise GroqAPIError(f"Groq API network error: {e.reason}") from e
+        except json.JSONDecodeError as e:
+            raise GroqAPIError("Groq API returned invalid JSON payload") from e
+
+        try:
+            content = body["choices"][0]["message"]["content"]
+            if not isinstance(content, str) or not content.strip():
+                raise GroqAPIError("Groq API returned empty content")
+            return content.strip()
+        except (KeyError, IndexError, TypeError) as e:
+            raise GroqAPIError("Groq API response missing assistant content") from e
+
+    if last_error:
+        raise last_error
+    raise GroqAPIError("Groq API call failed")
 
 
 def _extract_json_payload(text: str) -> Optional[Any]:
