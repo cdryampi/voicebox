@@ -3,7 +3,7 @@ Pydantic models for request/response validation.
 """
 
 from pydantic import BaseModel, Field
-from typing import Optional, List
+from typing import Optional, List, Literal
 from datetime import datetime
 
 
@@ -55,7 +55,7 @@ class GenerationRequest(BaseModel):
     text: str = Field(..., min_length=1, max_length=5000)
     language: str = Field(default="en", pattern="^(zh|en|ja|ko|de|fr|ru|pt|es|it)$")
     seed: Optional[int] = Field(None, ge=0)
-    model_size: Optional[str] = Field(default="1.7B", pattern="^(1\\.7B|0\\.6B)$")
+    model_size: Optional[str] = Field(default=None, pattern="^(1\\.7B|0\\.6B)$")
     instruct: Optional[str] = Field(None, max_length=500)
 
 
@@ -164,10 +164,21 @@ class ActiveGenerationTask(BaseModel):
     started_at: datetime
 
 
+class ActiveStoryRenderTask(BaseModel):
+    """Response model for active story render task."""
+    job_id: str
+    story_id: str
+    status: str
+    total_lines: int
+    processed_lines: int
+    started_at: datetime
+
+
 class ActiveTasksResponse(BaseModel):
     """Response model for active tasks."""
     downloads: List[ActiveDownloadTask]
     generations: List[ActiveGenerationTask]
+    story_renders: List[ActiveStoryRenderTask] = []
 
 
 class AudioChannelCreate(BaseModel):
@@ -299,3 +310,220 @@ class StoryItemTrim(BaseModel):
 class StoryItemSplit(BaseModel):
     """Request model for splitting a story item."""
     split_time_ms: int = Field(..., ge=0)  # Time within the clip to split at (relative to clip start)
+
+
+EmotionType = Literal["neutral", "happy", "sad", "angry", "fearful", "surprised", "calm"]
+
+
+class StoryCharacterMapping(BaseModel):
+    """Character-to-voice mapping for story render jobs."""
+    character_name: str = Field(..., min_length=1, max_length=100)
+    profile_id: str
+    description: Optional[str] = Field(default=None, min_length=1, max_length=500)
+    default_emotion: EmotionType = "neutral"
+    default_emotion_intensity: float = Field(default=0.5, ge=0.0, le=1.0)
+    default_track: int = 0
+
+
+class StoryLineSpec(BaseModel):
+    """Single line render instruction based on a source history generation."""
+    source_generation_id: str
+    character_name: str = Field(..., min_length=1, max_length=100)
+    text_override: Optional[str] = Field(default=None, min_length=1, max_length=5000)
+    emotion: Optional[EmotionType] = None
+    emotion_intensity: Optional[float] = Field(default=None, ge=0.0, le=1.0)
+    track: Optional[int] = None
+    start_time_ms: Optional[int] = Field(default=None, ge=0)
+
+
+class StoryRenderFromHistoryRequest(BaseModel):
+    """Create and render a new story from existing generation history."""
+    story_id: Optional[str] = None
+    name: str = Field(..., min_length=1, max_length=100)
+    description: Optional[str] = Field(None, max_length=500)
+    model_size: Optional[str] = Field(default=None, pattern="^(1\\.7B|0\\.6B)$")
+    language: str = Field(default="en", pattern="^(zh|en|ja|ko|de|fr|ru|pt|es|it)$")
+    gap_ms: int = Field(default=200, ge=0, le=5000)
+    continue_on_error: bool = True
+    replace_existing_items: bool = False
+    character_mappings: List[StoryCharacterMapping] = Field(..., min_length=1)
+    lines: List[StoryLineSpec] = Field(..., min_length=1)
+
+
+class StoryRenderJobResponse(BaseModel):
+    """Response when a story render job is created."""
+    job_id: str
+    story_id: str
+    status: str
+    total_lines: int
+
+
+class StoryRenderLineStatus(BaseModel):
+    """Status for one line in a story render job."""
+    id: str
+    order_index: int
+    source_generation_id: str
+    generated_generation_id: Optional[str]
+    character_name: str
+    profile_id: str
+    text: str
+    emotion: EmotionType
+    emotion_intensity: float
+    resolved_instruct: Optional[str]
+    track: int
+    start_time_ms: int
+    status: str
+    error_message: Optional[str] = None
+
+
+class StoryRenderStatusResponse(BaseModel):
+    """Current status for a story render job."""
+    job_id: str
+    story_id: str
+    status: str
+    total_lines: int
+    processed_lines: int
+    error_summary: Optional[str]
+    output_audio_path: Optional[str]
+    created_at: datetime
+    updated_at: datetime
+    completed_at: Optional[datetime]
+    lines: List[StoryRenderLineStatus]
+
+
+class GroqModelsResponse(BaseModel):
+    """Groq model list and runtime status."""
+    enabled: bool
+    default_model: str
+    models: List[str]
+
+
+class StoryComposeWithGroqRequest(BaseModel):
+    """Compose story lines with Groq and render them to audio."""
+    name: str = Field(..., min_length=1, max_length=100)
+    description: Optional[str] = Field(None, max_length=500)
+    prompt: str = Field(..., min_length=5, max_length=4000)
+    mode: Literal["novela", "roleplay"] = "roleplay"
+    language: str = Field(default="en", pattern="^(zh|en|ja|ko|de|fr|ru|pt|es|it)$")
+    target_lines: int = Field(default=8, ge=2, le=40)
+    llm_model: Optional[str] = Field(default=None, max_length=120)
+    model_size: Optional[str] = Field(default=None, pattern="^(1\\.7B|0\\.6B)$")
+    gap_ms: int = Field(default=200, ge=0, le=5000)
+    continue_on_error: bool = True
+    character_mappings: List[StoryCharacterMapping] = Field(..., min_length=1, max_length=10)
+
+
+class StudioLimits(BaseModel):
+    """Hard limits used by Studio draft generation and previews."""
+    max_lines: int = Field(default=20, ge=2, le=40)
+    max_chars_per_line: int = Field(default=300, ge=50, le=1000)
+    preview_seconds: int = Field(default=5, ge=1, le=10)
+
+
+class StudioDraftCreateRequest(BaseModel):
+    """Create a Studio draft from a prompt using Groq."""
+    story_id: Optional[str] = None
+    name: str = Field(..., min_length=1, max_length=100)
+    description: Optional[str] = Field(None, max_length=500)
+    prompt: str = Field(..., min_length=5, max_length=4000)
+    mode: Literal["novela", "roleplay"] = "roleplay"
+    language: str = Field(default="en", pattern="^(zh|en|ja|ko|de|fr|ru|pt|es|it)$")
+    llm_model: Optional[str] = Field(default=None, max_length=120)
+    model_size: Optional[str] = Field(default=None, pattern="^(1\\.7B|0\\.6B)$")
+    gap_ms: int = Field(default=200, ge=0, le=5000)
+    continue_on_error: bool = True
+    character_mappings: List[StoryCharacterMapping] = Field(..., min_length=1, max_length=10)
+    limits: Optional[StudioLimits] = None
+
+
+class StudioDraftResponse(BaseModel):
+    """Basic response for Studio draft creation."""
+    draft_id: str
+    story_id: str
+    line_count: int
+    status: str
+    limits_applied: StudioLimits
+
+
+class StudioDraftListItem(BaseModel):
+    """Studio draft item for listing and quick selection."""
+    draft_id: str
+    story_id: str
+    name: str
+    status: str
+    line_count: int
+    created_at: datetime
+    updated_at: datetime
+
+
+class StudioDraftLineResponse(BaseModel):
+    """Studio draft line/card detail."""
+    id: str
+    order_index: int
+    character_name: str
+    profile_id: str
+    text: str
+    emotion: EmotionType
+    emotion_intensity: float
+    truncated: bool = False
+    preview_status: str
+    preview_audio_url: Optional[str] = None
+    preview_duration: Optional[float] = None
+    preview_error: Optional[str] = None
+
+    class Config:
+        from_attributes = True
+
+
+class StudioDraftDetailResponse(BaseModel):
+    """Full Studio draft response including all cards."""
+    draft_id: str
+    story_id: str
+    name: str
+    description: Optional[str] = None
+    prompt: str
+    mode: Literal["novela", "roleplay"]
+    language: str
+    llm_model: str
+    model_size: Optional[str] = None
+    gap_ms: int
+    continue_on_error: bool
+    status: str
+    limits_applied: StudioLimits
+    character_mappings: List[StoryCharacterMapping]
+    created_at: datetime
+    updated_at: datetime
+    lines: List[StudioDraftLineResponse]
+
+
+class StudioDraftLineUpdate(BaseModel):
+    """Line-level update payload for Studio drafts."""
+    line_id: str
+    character_name: Optional[str] = Field(default=None, min_length=1, max_length=100)
+    text: Optional[str] = Field(default=None, min_length=1, max_length=5000)
+    emotion: Optional[EmotionType] = None
+    emotion_intensity: Optional[float] = Field(default=None, ge=0.0, le=1.0)
+    order_index: Optional[int] = Field(default=None, ge=0)
+
+
+class StudioDraftLinesUpdateRequest(BaseModel):
+    """Batch line update request for Studio drafts."""
+    lines: List[StudioDraftLineUpdate] = Field(..., min_length=1)
+
+
+class StudioPreviewResponse(BaseModel):
+    """Response for single card preview generation."""
+    line_id: str
+    status: str
+    preview_audio_url: Optional[str] = None
+    duration: Optional[float] = None
+    error: Optional[str] = None
+
+
+class StudioRenderFinalResponse(BaseModel):
+    """Response for launching final render from a Studio draft."""
+    draft_id: str
+    job_id: str
+    story_id: str
+    status: str
+    total_lines: int

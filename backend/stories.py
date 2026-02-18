@@ -2,13 +2,15 @@
 Story management module.
 """
 
-from typing import List, Optional
+from typing import List, Optional, Dict
 from datetime import datetime
 import uuid
 import tempfile
 from pathlib import Path
+import asyncio
 from sqlalchemy.orm import Session
 from sqlalchemy import func
+from pydantic import ValidationError
 
 from .models import (
     StoryCreate,
@@ -20,9 +22,32 @@ from .models import (
     StoryItemMove,
     StoryItemTrim,
     StoryItemSplit,
+    StoryRenderFromHistoryRequest,
+    StoryLineSpec,
+    StoryRenderJobResponse,
+    StoryRenderStatusResponse,
+    StoryRenderLineStatus,
+    StoryComposeWithGroqRequest,
+    EmotionType,
 )
-from .database import Story as DBStory, StoryItem as DBStoryItem, Generation as DBGeneration, VoiceProfile as DBVoiceProfile
+from .database import (
+    Story as DBStory,
+    StoryItem as DBStoryItem,
+    Generation as DBGeneration,
+    VoiceProfile as DBVoiceProfile,
+    StoryRenderJob as DBStoryRenderJob,
+    StoryScriptLine as DBStoryScriptLine,
+)
+from . import history, profiles, tts, config, database as db_module
+from .settings import load_settings
 from .utils.audio import load_audio, save_audio
+from .utils.tasks import get_task_manager
+from .utils.groq import (
+    GroqAPIError,
+    maybe_generate_emotion_instruction_with_groq,
+    compose_story_lines_with_groq,
+    list_available_groq_models,
+)
 import numpy as np
 
 
@@ -970,3 +995,539 @@ async def export_story_audio(
     finally:
         # Clean up temp file
         Path(tmp_path).unlink(missing_ok=True)
+
+
+_EMOTION_GUIDANCE = {
+    "neutral": "steady, clear, and natural",
+    "happy": "warm, upbeat, and smiling",
+    "sad": "soft, reflective, and emotionally heavy",
+    "angry": "firm, tense, and energetic",
+    "fearful": "nervous, shaky, and cautious",
+    "surprised": "reactive, bright, and sudden",
+    "calm": "slow, grounded, and soothing",
+}
+
+_ALLOWED_EMOTIONS: set[str] = {
+    "neutral",
+    "happy",
+    "sad",
+    "angry",
+    "fearful",
+    "surprised",
+    "calm",
+}
+
+
+def build_emotion_instruction(emotion: str, intensity: float, character_name: str) -> str:
+    """Build a concise TTS performance instruction from normalized emotion input."""
+    normalized_emotion = emotion if emotion in _EMOTION_GUIDANCE else "neutral"
+    normalized_intensity = min(1.0, max(0.0, float(intensity)))
+    guidance = _EMOTION_GUIDANCE[normalized_emotion]
+    return (
+        f"{character_name} speaks in a {guidance} style "
+        f"with emotional intensity {normalized_intensity:.2f}."
+    )
+
+
+def _normalize_emotion(emotion: Optional[str]) -> EmotionType:
+    value = (emotion or "neutral").strip().lower()
+    if value in _ALLOWED_EMOTIONS:
+        return value  # type: ignore[return-value]
+    return "neutral"
+
+
+async def compose_story_with_groq(
+    data: StoryComposeWithGroqRequest,
+    db: Session,
+) -> StoryRenderJobResponse:
+    """
+    Use Groq LLM to compose emotional dialogue lines, then start audio render job.
+    """
+    settings = load_settings()
+    if not settings.groq_api_key:
+        raise ValueError("GROQ_API_KEY is not configured. Add it to .env or environment variables.")
+
+    if not data.character_mappings:
+        raise ValueError("At least one character mapping is required.")
+    if len(data.character_mappings) > 10:
+        raise ValueError("Character mappings must be between 1 and 10.")
+
+    llm_model = data.llm_model or settings.groq_model
+    allowed_models = list_available_groq_models(settings)
+    if llm_model not in allowed_models:
+        raise ValueError(f"Unknown llm_model '{llm_model}'. Use one of /llm/groq/models.")
+
+    character_names = [m.character_name for m in data.character_mappings]
+    character_descriptions: Dict[str, str] = {}
+    for mapping in data.character_mappings:
+        description = (mapping.description or "").strip()
+        if not description:
+            raise ValueError(f"Character description is required for {mapping.character_name}")
+        character_descriptions[mapping.character_name] = description
+    try:
+        composed_lines = compose_story_lines_with_groq(
+            settings,
+            prompt=data.prompt,
+            mode=data.mode,
+            language=data.language,
+            characters=character_names,
+            character_descriptions=character_descriptions,
+            target_lines=data.target_lines,
+            model=llm_model,
+        )
+    except GroqAPIError as e:
+        raise ValueError(f"Groq failed to compose story lines: {e}") from e
+
+    char_map = {m.character_name: m for m in data.character_mappings}
+    line_specs: List[StoryLineSpec] = []
+
+    for raw in composed_lines:
+        if not isinstance(raw, dict):
+            continue
+
+        raw_character = str(raw.get("character_name", "")).strip()
+        if raw_character not in char_map:
+            # fallback: assign first configured character
+            raw_character = data.character_mappings[0].character_name
+
+        raw_text = str(raw.get("text", "")).strip()
+        if not raw_text:
+            continue
+        # Keep line under schema max length to avoid pydantic validation crashes from LLM output.
+        raw_text = raw_text[:5000]
+
+        raw_emotion = _normalize_emotion(str(raw.get("emotion", "neutral")))
+        raw_intensity = raw.get("emotion_intensity", 0.5)
+        try:
+            intensity = min(1.0, max(0.0, float(raw_intensity)))
+        except (ValueError, TypeError):
+            intensity = 0.5
+
+        try:
+            line_specs.append(
+                StoryLineSpec(
+                    # Virtual source id for composed lines (not linked to existing history generation).
+                    source_generation_id=f"virtual:{uuid.uuid4()}",
+                    character_name=raw_character,
+                    text_override=raw_text,
+                    emotion=raw_emotion,
+                    emotion_intensity=intensity,
+                    track=None,
+                    start_time_ms=None,
+                )
+            )
+        except ValidationError:
+            # Skip malformed lines from LLM output instead of failing request with 500.
+            continue
+
+    if not line_specs:
+        raise ValueError("Groq output did not include valid lines to render.")
+
+    render_request = StoryRenderFromHistoryRequest(
+        name=data.name,
+        description=data.description,
+        model_size=data.model_size,
+        language=data.language,
+        gap_ms=data.gap_ms,
+        continue_on_error=data.continue_on_error,
+        character_mappings=data.character_mappings,
+        lines=line_specs,
+    )
+    return await create_story_render_from_history(render_request, db)
+
+
+async def create_story_render_from_history(
+    data: StoryRenderFromHistoryRequest,
+    db: Session,
+) -> StoryRenderJobResponse:
+    """
+    Create an asynchronous render job from history items with character emotion controls.
+    """
+    character_map: Dict[str, dict] = {}
+
+    for mapping in data.character_mappings:
+        if mapping.character_name in character_map:
+            raise ValueError(f"Duplicate character mapping: {mapping.character_name}")
+
+        profile = db.query(DBVoiceProfile).filter_by(id=mapping.profile_id).first()
+        if not profile:
+            raise ValueError(
+                f"Profile {mapping.profile_id} for character {mapping.character_name} not found"
+            )
+
+        character_map[mapping.character_name] = {
+            "profile_id": mapping.profile_id,
+            "default_emotion": mapping.default_emotion,
+            "default_emotion_intensity": mapping.default_emotion_intensity,
+            "default_track": mapping.default_track,
+        }
+
+    # Validate source generations and create story/job records.
+    if data.story_id:
+        story = db.query(DBStory).filter_by(id=data.story_id).first()
+        if not story:
+            raise ValueError(f"Story not found: {data.story_id}")
+        story.name = data.name
+        story.description = data.description
+        story.updated_at = datetime.utcnow()
+
+        if data.replace_existing_items:
+            db.query(DBStoryItem).filter_by(story_id=story.id).delete()
+    else:
+        story = DBStory(
+            id=str(uuid.uuid4()),
+            name=data.name,
+            description=data.description,
+            created_at=datetime.utcnow(),
+            updated_at=datetime.utcnow(),
+        )
+        db.add(story)
+        db.flush()
+
+    job = DBStoryRenderJob(
+        id=str(uuid.uuid4()),
+        story_id=story.id,
+        status="queued",
+        total_lines=len(data.lines),
+        processed_lines=0,
+        created_at=datetime.utcnow(),
+        updated_at=datetime.utcnow(),
+    )
+    db.add(job)
+    db.flush()
+
+    for idx, line in enumerate(data.lines):
+        if line.character_name not in character_map:
+            raise ValueError(f"Character mapping not found for line: {line.character_name}")
+
+        source_generation = db.query(DBGeneration).filter_by(id=line.source_generation_id).first()
+        is_virtual_source = line.source_generation_id.startswith("virtual:")
+        if not source_generation and not is_virtual_source:
+            raise ValueError(f"Source generation not found: {line.source_generation_id}")
+
+        mapping = character_map[line.character_name]
+        if line.text_override:
+            text = line.text_override
+        elif source_generation:
+            text = source_generation.text
+        else:
+            raise ValueError(
+                "text_override is required for virtual source lines "
+                f"({line.source_generation_id})"
+            )
+        emotion = line.emotion or mapping["default_emotion"]
+        emotion_intensity = (
+            line.emotion_intensity
+            if line.emotion_intensity is not None
+            else mapping["default_emotion_intensity"]
+        )
+        track = line.track if line.track is not None else mapping["default_track"]
+        start_time_ms = line.start_time_ms if line.start_time_ms is not None else -1
+
+        db.add(
+            DBStoryScriptLine(
+                id=str(uuid.uuid4()),
+                job_id=job.id,
+                story_id=story.id,
+                order_index=idx,
+                source_generation_id=line.source_generation_id,
+                generated_generation_id=None,
+                character_name=line.character_name,
+                profile_id=mapping["profile_id"],
+                text=text,
+                emotion=emotion,
+                emotion_intensity=emotion_intensity,
+                resolved_instruct=None,
+                track=track,
+                start_time_ms=start_time_ms,
+                status="queued",
+                error_message=None,
+                created_at=datetime.utcnow(),
+                updated_at=datetime.utcnow(),
+            )
+        )
+
+    db.commit()
+
+    task_manager = get_task_manager()
+    task_manager.start_story_render(job.id, story.id, len(data.lines))
+
+    asyncio.create_task(
+        _run_story_render_job_background(
+            job_id=job.id,
+            model_size=data.model_size,
+            language=data.language,
+            gap_ms=data.gap_ms,
+            continue_on_error=data.continue_on_error,
+        )
+    )
+
+    return StoryRenderJobResponse(
+        job_id=job.id,
+        story_id=story.id,
+        status="queued",
+        total_lines=len(data.lines),
+    )
+
+
+async def _run_story_render_job_background(
+    job_id: str,
+    model_size: Optional[str],
+    language: str,
+    gap_ms: int,
+    continue_on_error: bool,
+) -> None:
+    """
+    Execute story render job sequentially to avoid GPU OOM on smaller instances (e.g., T4).
+    """
+    settings = load_settings()
+    task_manager = get_task_manager()
+    if db_module.SessionLocal is None:
+        task_manager.complete_story_render(job_id, status="failed", error="Database session not initialized")
+        return
+    db = db_module.SessionLocal()
+    errors: List[str] = []
+
+    try:
+        job = db.query(DBStoryRenderJob).filter_by(id=job_id).first()
+        if not job:
+            task_manager.complete_story_render(job_id, status="failed", error="Job not found")
+            return
+
+        job.status = "running"
+        job.updated_at = datetime.utcnow()
+        db.commit()
+
+        tts_model = tts.get_tts_model()
+        requested_model_size = model_size or settings.default_model_size
+        await tts_model.load_model_async(requested_model_size)
+
+        script_lines = (
+            db.query(DBStoryScriptLine)
+            .filter_by(job_id=job_id)
+            .order_by(DBStoryScriptLine.order_index.asc())
+            .all()
+        )
+
+        current_time_ms = 0
+        processed_lines = 0
+
+        for line_ref in script_lines:
+            line_id = line_ref.id
+            line = db.query(DBStoryScriptLine).filter_by(id=line_id).first()
+            if not line:
+                continue
+
+            try:
+                line.status = "running"
+                line.updated_at = datetime.utcnow()
+                db.commit()
+
+                source_generation = db.query(DBGeneration).filter_by(id=line.source_generation_id).first()
+                if not source_generation and not line.source_generation_id.startswith("virtual:"):
+                    raise ValueError(f"Source generation not found: {line.source_generation_id}")
+
+                fallback_instruct = build_emotion_instruction(
+                    emotion=line.emotion,
+                    intensity=line.emotion_intensity,
+                    character_name=line.character_name,
+                )
+                resolved_instruct = maybe_generate_emotion_instruction_with_groq(
+                    settings,
+                    text=line.text,
+                    character_name=line.character_name,
+                    emotion=line.emotion,
+                    intensity=line.emotion_intensity,
+                    fallback_instruction=fallback_instruct,
+                )
+
+                voice_prompt = await profiles.create_voice_prompt_for_profile(line.profile_id, db)
+                audio, sample_rate = await tts_model.generate(
+                    text=line.text,
+                    voice_prompt=voice_prompt,
+                    language=language,
+                    instruct=resolved_instruct,
+                )
+
+                duration = len(audio) / sample_rate
+                audio_id = str(uuid.uuid4())
+                audio_path = config.get_generations_dir() / f"{audio_id}.wav"
+                save_audio(audio, str(audio_path), sample_rate)
+
+                generated = await history.create_generation(
+                    profile_id=line.profile_id,
+                    text=line.text,
+                    language=language,
+                    audio_path=str(audio_path),
+                    duration=duration,
+                    seed=None,
+                    db=db,
+                    instruct=resolved_instruct,
+                )
+
+                was_explicit_start = line.start_time_ms >= 0
+                start_time_ms = line.start_time_ms if was_explicit_start else current_time_ms
+                db.add(
+                    DBStoryItem(
+                        id=str(uuid.uuid4()),
+                        story_id=job.story_id,
+                        generation_id=generated.id,
+                        start_time_ms=start_time_ms,
+                        track=line.track,
+                        trim_start_ms=0,
+                        trim_end_ms=0,
+                        created_at=datetime.utcnow(),
+                    )
+                )
+
+                line.generated_generation_id = generated.id
+                line.resolved_instruct = resolved_instruct
+                line.status = "completed"
+                line.start_time_ms = start_time_ms
+                line.updated_at = datetime.utcnow()
+
+                processed_lines += 1
+                job.processed_lines = processed_lines
+                job.updated_at = datetime.utcnow()
+
+                # Only auto-place next line when current line is auto-placed.
+                end_time_ms = start_time_ms + int(duration * 1000)
+                if was_explicit_start:
+                    current_time_ms = max(current_time_ms, end_time_ms + gap_ms)
+                else:
+                    current_time_ms = end_time_ms + gap_ms
+
+                db.commit()
+                task_manager.update_story_render_progress(job_id, processed_lines)
+            except Exception as line_error:
+                db.rollback()
+                line = db.query(DBStoryScriptLine).filter_by(id=line_id).first()
+                if line:
+                    line.status = "failed"
+                    line.error_message = str(line_error)[:1000]
+                    line.updated_at = datetime.utcnow()
+                errors.append(f"line {line_ref.order_index}: {line_error}")
+                job = db.query(DBStoryRenderJob).filter_by(id=job_id).first()
+                if job:
+                    job.updated_at = datetime.utcnow()
+                db.commit()
+                if not continue_on_error:
+                    break
+
+        job = db.query(DBStoryRenderJob).filter_by(id=job_id).first()
+        if not job:
+            return
+
+        if processed_lines == 0:
+            job.status = "failed"
+        elif errors:
+            job.status = "partial_failed"
+        else:
+            job.status = "completed"
+
+        if errors:
+            job.error_summary = " | ".join(errors[:5])
+
+        if processed_lines > 0:
+            audio_bytes = await export_story_audio(job.story_id, db)
+            if audio_bytes:
+                story_dir = config.get_stories_dir() / job.story_id
+                story_dir.mkdir(parents=True, exist_ok=True)
+                output_path = story_dir / "final_mix.wav"
+                output_path.write_bytes(audio_bytes)
+                job.output_audio_path = str(output_path)
+
+        job.completed_at = datetime.utcnow()
+        job.updated_at = datetime.utcnow()
+        db.commit()
+
+        task_manager.complete_story_render(
+            job_id,
+            status=job.status,
+            error=job.error_summary,
+        )
+    except Exception as job_error:
+        db.rollback()
+        job = db.query(DBStoryRenderJob).filter_by(id=job_id).first()
+        if job:
+            job.status = "failed"
+            job.error_summary = str(job_error)[:1000]
+            job.completed_at = datetime.utcnow()
+            job.updated_at = datetime.utcnow()
+            db.commit()
+        task_manager.complete_story_render(job_id, status="failed", error=str(job_error))
+    finally:
+        db.close()
+
+
+async def get_story_render_status(
+    job_id: str,
+    db: Session,
+) -> Optional[StoryRenderStatusResponse]:
+    """Get status and per-line results for a render job."""
+    job = db.query(DBStoryRenderJob).filter_by(id=job_id).first()
+    if not job:
+        return None
+
+    lines = (
+        db.query(DBStoryScriptLine)
+        .filter_by(job_id=job_id)
+        .order_by(DBStoryScriptLine.order_index.asc())
+        .all()
+    )
+
+    line_statuses: List[StoryRenderLineStatus] = []
+    for line in lines:
+        emotion = line.emotion if line.emotion in _EMOTION_GUIDANCE else "neutral"
+        line_statuses.append(
+            StoryRenderLineStatus(
+                id=line.id,
+                order_index=line.order_index,
+                source_generation_id=line.source_generation_id,
+                generated_generation_id=line.generated_generation_id,
+                character_name=line.character_name,
+                profile_id=line.profile_id,
+                text=line.text,
+                emotion=emotion,
+                emotion_intensity=line.emotion_intensity,
+                resolved_instruct=line.resolved_instruct,
+                track=line.track,
+                start_time_ms=line.start_time_ms if line.start_time_ms >= 0 else 0,
+                status=line.status,
+                error_message=line.error_message,
+            )
+        )
+
+    return StoryRenderStatusResponse(
+        job_id=job.id,
+        story_id=job.story_id,
+        status=job.status,
+        total_lines=job.total_lines,
+        processed_lines=job.processed_lines,
+        error_summary=job.error_summary,
+        output_audio_path=job.output_audio_path,
+        created_at=job.created_at,
+        updated_at=job.updated_at,
+        completed_at=job.completed_at,
+        lines=line_statuses,
+    )
+
+
+async def get_story_audio_path(story_id: str, db: Session) -> Optional[Path]:
+    """Get persisted mixed audio path for a story (if available)."""
+    job = (
+        db.query(DBStoryRenderJob)
+        .filter(
+            DBStoryRenderJob.story_id == story_id,
+            DBStoryRenderJob.output_audio_path.isnot(None),
+        )
+        .order_by(DBStoryRenderJob.updated_at.desc())
+        .first()
+    )
+    if not job or not job.output_audio_path:
+        return None
+
+    path = Path(job.output_audio_path)
+    if not path.exists():
+        return None
+    return path
