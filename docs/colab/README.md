@@ -12,6 +12,12 @@ Use `voicebox_t4_deploy.ipynb` to run the full Voicebox backend in Google Colab,
 - `VOICEBOX_DATA_DIR` (recommended in Google Drive)
 - optional `VOICEBOX_GROQ_API_KEY` for Story Director endpoints
 
+## Secret handling
+
+- Do not hardcode real keys in the notebook before committing.
+- The notebook supports runtime secret input (`getpass`) and Colab Secrets (`google.colab.userdata`).
+- Keep `VOICEBOX_API_KEY`, `VOICEBOX_GROQ_API_KEY`, and `NGROK_AUTH_TOKEN` out of Git.
+
 ## Runtime outputs
 
 The notebook prints:
