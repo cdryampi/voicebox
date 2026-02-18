@@ -329,7 +329,8 @@ def compose_story_lines_with_groq(
         "Return strict JSON only, no markdown, no extra text."
     )
     max_chars_limit = max(20, int(max_chars_per_line)) if max_chars_per_line is not None else None
-    preferred_min_chars = max(24, int(max_chars_limit * 0.55)) if max_chars_limit else None
+    # Keep this as a soft target, not a hard requirement.
+    preferred_min_chars = max(24, int(max_chars_limit * 0.4)) if max_chars_limit else None
     max_chars_instruction = (
         f"Max chars per line: {max_chars_limit}\n"
         if max_chars_limit is not None
@@ -455,9 +456,10 @@ def compose_story_lines_with_groq(
                 )
                 continue
 
-            if len(too_short) > max(2, int(len(normalized_lines) * 0.6)):
+            too_many_short_lines = len(too_short) > max(2, int(len(normalized_lines) * 0.8))
+            if too_many_short_lines and attempt < 2:
                 sample = ", ".join(too_short[:6])
-                last_error = "Groq returned too many short lines for the configured char budget"
+                last_error = "Groq returned too many short lines; retrying with stricter guidance"
                 retry_feedback = (
                     f"Too many lines were shorter than {preferred_min_chars} chars: {sample}. "
                     "Expand lines with richer, scene-specific detail."
