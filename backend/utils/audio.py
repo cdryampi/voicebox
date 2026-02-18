@@ -99,19 +99,27 @@ def validate_reference_audio(
         Tuple of (is_valid, error_message)
     """
     try:
-        audio, sr = load_audio(audio_path)
+        # Validate on original sample rate to avoid false clipping positives from resampling overshoot.
+        audio, sr = librosa.load(audio_path, sr=None, mono=True)
+        audio = audio.astype(np.float32)
         duration = len(audio) / sr
         
         if duration < min_duration:
             return False, f"Audio too short (minimum {min_duration} seconds)"
         if duration > max_duration:
             return False, f"Audio too long (maximum {max_duration} seconds)"
+
+        if not np.all(np.isfinite(audio)):
+            return False, "Audio contains invalid values"
         
         rms = np.sqrt(np.mean(audio**2))
         if rms < min_rms:
             return False, "Audio is too quiet or silent"
-        
-        if np.abs(audio).max() > 0.99:
+
+        peak = float(np.abs(audio).max())
+        clipped_ratio = float(np.mean(np.abs(audio) >= 0.999))
+        # Allow occasional codec peaks but reject aggressively clipped references.
+        if peak > 1.15 or clipped_ratio > 0.03:
             return False, "Audio is clipping (reduce input gain)"
         
         return True, None
