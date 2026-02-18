@@ -891,13 +891,27 @@ async def generate_speech(
                 )
 
         await tts_model.load_model_async(model_size)
-        audio, sample_rate = await tts_model.generate(
-            data.text,
-            voice_prompt,
-            data.language,
-            data.seed,
-            data.instruct,
-        )
+        try:
+            audio, sample_rate = await asyncio.wait_for(
+                tts_model.generate(
+                    data.text,
+                    voice_prompt,
+                    data.language,
+                    data.seed,
+                    data.instruct,
+                ),
+                timeout=SETTINGS.tts_generation_timeout_seconds,
+            )
+        except asyncio.TimeoutError as e:
+            raise HTTPException(
+                status_code=504,
+                detail={
+                    "message": (
+                        "Audio generation timed out. Try shorter text/cards or retry after current work completes."
+                    ),
+                    "error_code": "GENERATION_TIMEOUT",
+                },
+            ) from e
 
         # Calculate duration
         duration = len(audio) / sample_rate

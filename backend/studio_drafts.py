@@ -6,6 +6,7 @@ from __future__ import annotations
 
 from datetime import datetime
 import json
+import asyncio
 from pathlib import Path
 from typing import Dict, List, Optional
 import uuid
@@ -936,12 +937,20 @@ async def generate_studio_line_preview(
 
         voice_prompt = await profiles.create_voice_prompt_for_profile(line.profile_id, db)
         instruct = _build_emotion_instruction(line.emotion, line.emotion_intensity, line.character_name)
-        audio, sample_rate = await tts_model.generate(
-            text=line.text,
-            voice_prompt=voice_prompt,
-            language=draft.language,
-            instruct=instruct,
-        )
+        try:
+            audio, sample_rate = await asyncio.wait_for(
+                tts_model.generate(
+                    text=line.text,
+                    voice_prompt=voice_prompt,
+                    language=draft.language,
+                    instruct=instruct,
+                ),
+                timeout=settings.tts_generation_timeout_seconds,
+            )
+        except asyncio.TimeoutError as e:
+            raise ValueError(
+                "Preview timed out while generating audio. Reduce card length or retry."
+            ) from e
 
         max_samples = int(limits.preview_seconds * sample_rate)
         if max_samples > 0 and len(audio) > max_samples:

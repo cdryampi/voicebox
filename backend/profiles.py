@@ -361,25 +361,25 @@ async def create_voice_prompt_for_profile(
         audio_paths = [s.audio_path for s in samples]
         reference_texts = [s.reference_text for s in samples]
 
-        # Combine audio
-        combined_audio, combined_text = await tts_model.combine_voice_prompts(
-            audio_paths,
-            reference_texts,
-        )
-
-        # Save combined audio to cache directory (persistent)
-        # Create a hash of sample IDs to identify this specific combination
+        # Build deterministic cache key for this exact sample set.
         import hashlib
         sample_ids_str = "-".join(sorted([s.id for s in samples]))
         combination_hash = hashlib.md5(sample_ids_str.encode()).hexdigest()[:12]
-        
+
         # Store in cache directory
         cache_dir = _get_cache_dir()
         cache_dir.mkdir(parents=True, exist_ok=True)
         combined_path = cache_dir / f"combined_{profile_id}_{combination_hash}.wav"
-        
-        # Save combined audio
-        save_audio(combined_audio, str(combined_path), 24000)
+
+        combined_text = " ".join(reference_texts)
+
+        # Reuse previously combined waveform when available to avoid expensive recompute.
+        if not combined_path.exists():
+            combined_audio, combined_text = await tts_model.combine_voice_prompts(
+                audio_paths,
+                reference_texts,
+            )
+            save_audio(combined_audio, str(combined_path), 24000)
 
         # Create prompt from combined audio
         voice_prompt, _ = await tts_model.create_voice_prompt(

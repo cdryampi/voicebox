@@ -65,6 +65,7 @@ class BackendSettings:
     db_pool_recycle_seconds: int
     db_connect_timeout_seconds: float
     db_use_null_pool: bool
+    tts_generation_timeout_seconds: int
 
 
 def load_settings() -> BackendSettings:
@@ -179,5 +180,10 @@ def load_settings() -> BackendSettings:
         db_use_null_pool=_parse_bool(
             os.getenv("VOICEBOX_DB_USE_NULL_POOL"),
             default=default_db_use_null_pool,
+        ),
+        tts_generation_timeout_seconds=_parse_int(
+            os.getenv("VOICEBOX_TTS_GENERATION_TIMEOUT_SECONDS"),
+            default=240 if colab_profile else 120,
+            minimum=10,
         ),
     )

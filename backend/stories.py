@@ -1419,12 +1419,20 @@ async def _run_story_render_job_background(
                     )
 
                     voice_prompt = await profiles.create_voice_prompt_for_profile(line.profile_id, db)
-                    audio, sample_rate = await tts_model.generate(
-                        text=line.text,
-                        voice_prompt=voice_prompt,
-                        language=language,
-                        instruct=resolved_instruct,
-                    )
+                    try:
+                        audio, sample_rate = await asyncio.wait_for(
+                            tts_model.generate(
+                                text=line.text,
+                                voice_prompt=voice_prompt,
+                                language=language,
+                                instruct=resolved_instruct,
+                            ),
+                            timeout=settings.tts_generation_timeout_seconds,
+                        )
+                    except asyncio.TimeoutError as e:
+                        raise RuntimeError(
+                            "Line generation timed out. Reduce text length/cards or retry."
+                        ) from e
 
                     duration = len(audio) / sample_rate
                     audio_id = str(uuid.uuid4())
