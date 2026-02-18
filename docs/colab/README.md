@@ -44,3 +44,9 @@ The notebook prints:
 
 - Colab sessions are ephemeral; keep data in Drive via `VOICEBOX_DATA_DIR`.
 - ngrok URL changes after restart; update app URL after each new session.
+
+## Troubleshooting
+
+- If you get `RuntimeError: Backend did not become ready in time`, check `/tmp/voicebox_backend.log` in Colab output.
+- Ensure `REPO_REF` points to a branch containing backend runtime files (`backend/settings.py`, `backend/studio_drafts.py`, `backend/utils/groq.py`).
+- Re-run install cell after changing `REPO_REF` to avoid stale dependencies.
