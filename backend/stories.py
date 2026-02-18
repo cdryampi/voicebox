@@ -49,6 +49,24 @@ from .utils.groq import (
     list_available_groq_models,
 )
 import numpy as np
+	
+	
+def _get_stories_output_dir() -> Path:
+    """Resolve stories directory even if running with an older config module."""
+    get_stories_dir = getattr(config, "get_stories_dir", None)
+    if callable(get_stories_dir):
+        try:
+            path = Path(get_stories_dir())
+            path.mkdir(parents=True, exist_ok=True)
+            return path
+        except Exception:
+            pass
+
+    get_data_dir = getattr(config, "get_data_dir", None)
+    base_dir = Path(get_data_dir()) if callable(get_data_dir) else Path("data")
+    path = base_dir / "stories"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
 
 
 async def create_story(
@@ -1431,7 +1449,7 @@ async def _run_story_render_job_background(
         if processed_lines > 0:
             audio_bytes = await export_story_audio(job.story_id, db)
             if audio_bytes:
-                story_dir = config.get_stories_dir() / job.story_id
+                story_dir = _get_stories_output_dir() / job.story_id
                 story_dir.mkdir(parents=True, exist_ok=True)
                 output_path = story_dir / "final_mix.wav"
                 output_path.write_bytes(audio_bytes)

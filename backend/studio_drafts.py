@@ -60,6 +60,24 @@ _EMOTION_GUIDANCE = {
 }
 
 
+def _get_stories_output_dir() -> Path:
+    """Resolve stories directory even if running with an older config module."""
+    get_stories_dir = getattr(config, "get_stories_dir", None)
+    if callable(get_stories_dir):
+        try:
+            path = Path(get_stories_dir())
+            path.mkdir(parents=True, exist_ok=True)
+            return path
+        except Exception:
+            pass
+
+    get_data_dir = getattr(config, "get_data_dir", None)
+    base_dir = Path(get_data_dir()) if callable(get_data_dir) else Path("data")
+    path = base_dir / "stories"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
 def _normalize_emotion(emotion: Optional[str]) -> EmotionType:
     value = (emotion or "neutral").strip().lower()
     if value in _ALLOWED_EMOTIONS:
@@ -465,7 +483,7 @@ async def generate_studio_line_preview(
 
         preview_duration = len(audio) / sample_rate if sample_rate > 0 else 0.0
 
-        preview_dir = config.get_stories_dir() / "studio_previews" / draft.id
+        preview_dir = _get_stories_output_dir() / "studio_previews" / draft.id
         preview_dir.mkdir(parents=True, exist_ok=True)
         preview_path = preview_dir / f"{line.id}.wav"
         save_audio(audio, str(preview_path), sample_rate)
