@@ -2,12 +2,20 @@ import { Loader2, XCircle } from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { useServerHealth } from '@/lib/hooks/useServer';
+import { apiClient } from '@/lib/api/client';
 import { useServerStore } from '@/stores/serverStore';
+import { useQuery } from '@tanstack/react-query';
 import { ModelProgress } from './ModelProgress';
 
 export function ServerStatus() {
   const { data: health, isLoading, error } = useServerHealth();
   const serverUrl = useServerStore((state) => state.serverUrl);
+  const runtimeQuery = useQuery({
+    queryKey: ['runtimeInfoForServerStatus'],
+    queryFn: () => apiClient.getRuntimeInfo(),
+    staleTime: 5000,
+  });
+  const isRemoteStt = runtimeQuery.data?.stt_provider === 'groq' && runtimeQuery.data?.colab_profile;
 
   return (
     <Card>
@@ -23,10 +31,14 @@ export function ServerStatus() {
         {/* Model download progress */}
         <div className="space-y-2">
           <ModelProgress modelName="qwen-tts-1.7B" displayName="Qwen TTS 1.7B" />
-          <ModelProgress modelName="whisper-base" displayName="Whisper Base" />
-          <ModelProgress modelName="whisper-small" displayName="Whisper Small" />
-          <ModelProgress modelName="whisper-medium" displayName="Whisper Medium" />
-          <ModelProgress modelName="whisper-large" displayName="Whisper Large" />
+          {!isRemoteStt && (
+            <>
+              <ModelProgress modelName="whisper-base" displayName="Whisper Base" />
+              <ModelProgress modelName="whisper-small" displayName="Whisper Small" />
+              <ModelProgress modelName="whisper-medium" displayName="Whisper Medium" />
+              <ModelProgress modelName="whisper-large" displayName="Whisper Large" />
+            </>
+          )}
         </div>
 
         {isLoading ? (
@@ -55,6 +67,11 @@ export function ServerStatus() {
               </Badge>
               {health.vram_used_mb && (
                 <Badge variant="outline">VRAM: {health.vram_used_mb.toFixed(0)} MB</Badge>
+              )}
+              {runtimeQuery.data?.stt_provider && (
+                <Badge variant="outline">
+                  STT: {runtimeQuery.data.stt_provider === 'groq' ? 'Groq Remote' : 'Whisper Local'}
+                </Badge>
               )}
             </div>
           </div>

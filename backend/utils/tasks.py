@@ -71,6 +71,7 @@ class TaskManager:
         self._next_event_id = 0
         self._model_operation_lock = threading.Lock()
         self._model_operation: Optional[ModelOperationState] = None
+        self._cancelled_story_renders: set[str] = set()
 
     def _push_terminal_event(
         self,
@@ -140,14 +141,17 @@ class TaskManager:
     
     def complete_generation(self, task_id: str, message: Optional[str] = None) -> None:
         """Mark a generation as complete."""
+        task_preview: Optional[str] = None
         with self._lock:
-            if task_id in self._active_generations:
+            task = self._active_generations.get(task_id)
+            if task:
+                task_preview = task.text_preview
                 del self._active_generations[task_id]
         self._push_terminal_event(
             kind="generation",
             state="completed",
             entity_id=task_id,
-            message=message or f"Generation completed: {task_id}",
+            message=message or f"Generation completed: {task_preview or task_id}",
         )
 
     def fail_generation(self, task_id: str, error: str, error_code: Optional[str] = None) -> None:
@@ -166,6 +170,7 @@ class TaskManager:
     def start_story_render(self, job_id: str, story_id: str, total_lines: int) -> None:
         """Mark a story render as started."""
         with self._lock:
+            self._cancelled_story_renders.discard(job_id)
             self._active_story_renders[job_id] = StoryRenderTask(
                 job_id=job_id,
                 story_id=story_id,
@@ -195,6 +200,7 @@ class TaskManager:
                 task.status = status
                 task.error = error
                 del self._active_story_renders[job_id]
+            self._cancelled_story_renders.discard(job_id)
 
         terminal_state: Literal["completed", "failed"] = (
             "completed" if status == "completed" else "failed"
@@ -245,6 +251,50 @@ class TaskManager:
         """Check if a story render is active."""
         with self._lock:
             return job_id in self._active_story_renders
+
+    def request_story_render_cancel(self, job_id: str) -> bool:
+        """Request cancellation for a running story render job."""
+        with self._lock:
+            if job_id not in self._active_story_renders:
+                return False
+            self._cancelled_story_renders.add(job_id)
+            return True
+
+    def request_cancel_all_story_renders(self) -> List[str]:
+        """Request cancellation for all active story render jobs."""
+        with self._lock:
+            ids = list(self._active_story_renders.keys())
+            self._cancelled_story_renders.update(ids)
+            return ids
+
+    def is_story_render_cancel_requested(self, job_id: str) -> bool:
+        """Check whether cancellation was requested for a story render job."""
+        with self._lock:
+            return job_id in self._cancelled_story_renders
+
+    def clear_story_render_cancel_request(self, job_id: str) -> None:
+        """Clear cancellation flag for story render."""
+        with self._lock:
+            self._cancelled_story_renders.discard(job_id)
+
+    def clear_active_generations(
+        self,
+        reason: str = "Generation cancelled by operator",
+        error_code: str = "TASK_CANCELLED",
+    ) -> List[str]:
+        """Force-clear tracked active generations (best effort control action)."""
+        with self._lock:
+            ids = list(self._active_generations.keys())
+            self._active_generations.clear()
+        for task_id in ids:
+            self._push_terminal_event(
+                kind="generation",
+                state="failed",
+                entity_id=task_id,
+                message=reason,
+                error_code=error_code,
+            )
+        return ids
 
     def start_model_operation(
         self,

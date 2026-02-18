@@ -45,12 +45,17 @@ from .database import (
     Generation as DBGeneration,
     ProfileSample as DBProfileSample,
     Story as DBStory,
+    StoryRenderJob as DBStoryRenderJob,
     VoiceProfile as DBVoiceProfile,
 )
 from .utils.progress import get_progress_manager
 from .utils.tasks import get_task_manager
 from .utils.cache import clear_voice_prompt_cache
-from .utils.groq import list_available_groq_models
+from .utils.groq import (
+    GroqSTTError,
+    list_available_groq_models,
+    transcribe_audio_with_groq,
+)
 from .utils import runtime_logs
 from .platform_detect import get_backend_type
 from .settings import load_settings
@@ -136,6 +141,23 @@ def _resolve_runtime_tts_model_size(requested_model_size: Optional[str]) -> str:
     if SETTINGS.default_model_size in {"1.7B", "0.6B"}:
         return SETTINGS.default_model_size
     return "1.7B"
+
+
+def _resolve_stt_provider() -> Literal["groq", "whisper_local"]:
+    provider = (SETTINGS.stt_provider or "").strip().lower()
+    if provider not in {"groq", "whisper_local"}:
+        provider = "groq" if SETTINGS.colab_profile else "whisper_local"
+    if SETTINGS.colab_profile:
+        # Colab profile is intentionally pinned to remote STT to avoid CUDA churn.
+        return "groq"
+    return provider  # type: ignore[return-value]
+
+
+def _is_stt_remote_only_mode() -> bool:
+    """
+    In Colab we keep backend dedicated to Qwen TTS and run STT remotely via Groq.
+    """
+    return bool(SETTINGS.colab_profile and _resolve_stt_provider() == "groq")
 
 
 def _extract_error_message_and_code(detail: object) -> tuple[str, Optional[str]]:
@@ -300,6 +322,7 @@ async def runtime_info():
     """Runtime diagnostics useful for remote deployment debugging."""
     backend_type = get_backend_type()
     tts_model = tts.get_tts_model()
+    stt_provider = _resolve_stt_provider()
     db = _new_db_session()
     try:
         defaults = _get_runtime_model_defaults(db)
@@ -311,6 +334,9 @@ async def runtime_info():
         "host": SETTINGS.host,
         "port": SETTINGS.port,
         "colab_profile": SETTINGS.colab_profile,
+        "stt_provider": stt_provider,
+        "stt_remote_enabled": stt_provider == "groq",
+        "stt_fallback_local_enabled": False,
         "default_model_size": defaults.default_tts_model_size,
         "default_whisper_model_size": defaults.default_whisper_model_size,
         "torch_cuda_available": torch.cuda.is_available(),
@@ -1123,16 +1149,51 @@ async def transcribe_audio(
         tmp.write(content)
         tmp_path = tmp.name
 
+    selected_model_size = None
+    stt_provider = _resolve_stt_provider()
     try:
         # Get audio duration
         from .utils.audio import load_audio
         audio, sr = load_audio(tmp_path)
         duration = len(audio) / sr
 
+        if stt_provider == "groq":
+            if not SETTINGS.groq_api_key:
+                return JSONResponse(
+                    status_code=503,
+                    content={
+                        "detail": "Groq STT is not configured. Set VOICEBOX_GROQ_API_KEY.",
+                        "error_code": "STT_PROVIDER_NOT_CONFIGURED",
+                    },
+                )
+            try:
+                text = transcribe_audio_with_groq(
+                    SETTINGS,
+                    audio_path=tmp_path,
+                    language=language,
+                    model=SETTINGS.groq_stt_model,
+                )
+                return models.TranscriptionResponse(
+                    text=text,
+                    duration=duration,
+                    provider="groq",
+                    provider_model=SETTINGS.groq_stt_model,
+                )
+            except GroqSTTError as e:
+                logger.error(
+                    "STT_GROQ_ERROR code=%s model=%s detail=%s",
+                    e.error_code,
+                    SETTINGS.groq_stt_model,
+                    str(e),
+                    extra={"tags": ["transcribe", "groq", "error"]},
+                )
+                return JSONResponse(
+                    status_code=e.status_code,
+                    content={"detail": str(e), "error_code": e.error_code},
+                )
+
         defaults = _get_runtime_model_defaults(db)
-        selected_model_size = (
-            model_size or defaults.default_whisper_model_size
-        ).strip().lower()
+        selected_model_size = (model_size or defaults.default_whisper_model_size).strip().lower()
         if selected_model_size not in {"base", "small", "medium", "large"}:
             raise HTTPException(status_code=400, detail="Invalid whisper model_size")
 
@@ -1177,6 +1238,8 @@ async def transcribe_audio(
         return models.TranscriptionResponse(
             text=text,
             duration=duration,
+            provider="whisper_local",
+            provider_model=f"whisper-{selected_model_size}",
         )
     except HTTPException:
         raise
@@ -1731,6 +1794,14 @@ async def activate_model(data: models.ModelDownloadRequest):
         }
         if model_name not in known_models:
             raise HTTPException(status_code=400, detail=f"Unknown model: {model_name}")
+        if _is_stt_remote_only_mode() and model_name.startswith("whisper-"):
+            return JSONResponse(
+                status_code=409,
+                content={
+                    "detail": "Whisper local is disabled in this Colab profile. Transcription runs via Groq.",
+                    "error_code": "STT_REMOTE_ONLY",
+                },
+            )
         if _is_cuda_single_model_mode() and model_name == "qwen-tts-0.6B":
             return JSONResponse(
                 status_code=409,
@@ -1905,6 +1976,8 @@ async def get_model_status():
     
     backend_type = get_backend_type()
     task_manager = get_task_manager()
+    stt_remote_only = _is_stt_remote_only_mode()
+    stt_remote_reason = "Disabled in Colab profile (STT remote via Groq)"
     
     # Get set of currently downloading model names
     active_download_names = {
@@ -2125,6 +2198,12 @@ async def get_model_status():
                 downloading=is_downloading,
                 size_mb=size_mb,
                 loaded=loaded,
+                disabled=stt_remote_only and config["model_name"].startswith("whisper-"),
+                disabled_reason=(
+                    stt_remote_reason
+                    if stt_remote_only and config["model_name"].startswith("whisper-")
+                    else None
+                ),
             ))
         except Exception as e:
             # If check fails, try to at least check if loaded
@@ -2143,6 +2222,12 @@ async def get_model_status():
                 downloading=is_downloading,
                 size_mb=None,
                 loaded=loaded,
+                disabled=stt_remote_only and config["model_name"].startswith("whisper-"),
+                disabled_reason=(
+                    stt_remote_reason
+                    if stt_remote_only and config["model_name"].startswith("whisper-")
+                    else None
+                ),
             ))
     
     return models.ModelStatusListResponse(models=statuses)
@@ -2185,6 +2270,14 @@ async def trigger_model_download(request: models.ModelDownloadRequest):
     
     if request.model_name not in model_configs:
         raise HTTPException(status_code=400, detail=f"Unknown model: {request.model_name}")
+    if _is_stt_remote_only_mode() and request.model_name.startswith("whisper-"):
+        return JSONResponse(
+            status_code=409,
+            content={
+                "detail": "Whisper local is disabled in this Colab profile. Transcription runs via Groq.",
+                "error_code": "STT_REMOTE_ONLY",
+            },
+        )
     if _is_cuda_single_model_mode() and request.model_name == "qwen-tts-0.6B":
         return JSONResponse(
             status_code=409,
@@ -2300,6 +2393,14 @@ async def delete_model(model_name: str):
     
     if model_name not in model_configs:
         raise HTTPException(status_code=400, detail=f"Unknown model: {model_name}")
+    if _is_stt_remote_only_mode() and model_name.startswith("whisper-"):
+        return JSONResponse(
+            status_code=409,
+            content={
+                "detail": "Whisper local is disabled in this Colab profile. Transcription runs via Groq.",
+                "error_code": "STT_REMOTE_ONLY",
+            },
+        )
     if _is_cuda_single_model_mode() and model_name == "qwen-tts-0.6B":
         return JSONResponse(
             status_code=409,
@@ -2512,6 +2613,93 @@ async def get_task_events(
     return models.TaskEventsResponse(events=serialized, last_id=last_id)
 
 
+@app.post("/stories/jobs/{job_id}/cancel", response_model=models.TaskCancelStoryRendersResponse)
+async def cancel_story_render_job(
+    job_id: str,
+    db: Session = Depends(get_db),
+):
+    """Request cancellation for a running story render job."""
+    job = db.query(DBStoryRenderJob).filter_by(id=job_id).first()
+    if not job:
+        raise HTTPException(status_code=404, detail="Story render job not found")
+
+    task_manager = get_task_manager()
+    active_before = len(task_manager.get_active_story_renders())
+    cancelled = task_manager.request_story_render_cancel(job_id)
+    return models.TaskCancelStoryRendersResponse(
+        cancelled_job_ids=[job_id] if cancelled else [],
+        active_before=active_before,
+        message=(
+            f"Cancellation requested for story render job {job_id}."
+            if cancelled
+            else f"Story render job {job_id} is not currently running."
+        ),
+    )
+
+
+@app.post("/tasks/story-renders/cancel", response_model=models.TaskCancelStoryRendersResponse)
+async def cancel_all_active_story_renders():
+    """Request cancellation for all running story render jobs."""
+    task_manager = get_task_manager()
+    active_before = len(task_manager.get_active_story_renders())
+    cancelled_ids = task_manager.request_cancel_all_story_renders()
+    return models.TaskCancelStoryRendersResponse(
+        cancelled_job_ids=cancelled_ids,
+        active_before=active_before,
+        message=(
+            f"Cancellation requested for {len(cancelled_ids)} active story render job(s)."
+            if cancelled_ids
+            else "No active story render jobs to cancel."
+        ),
+    )
+
+
+@app.post("/server/runtime/reset", response_model=models.RuntimeResetResponse)
+async def reset_server_runtime():
+    """
+    Reset runtime state without killing the process.
+    Useful in Colab when GPU memory/task state gets inconsistent.
+    """
+    task_manager = get_task_manager()
+    if task_manager.get_model_operation_state() is not None:
+        return _model_operation_conflict_response(task_manager, "reset_runtime", "server")
+
+    cancelled_story_render_ids = task_manager.request_cancel_all_story_renders()
+    cleared_generation_ids = task_manager.clear_active_generations(
+        reason="Generation cleared by runtime reset.",
+        error_code="TASK_RESET_BY_OPERATOR",
+    )
+
+    tts_model = tts.get_tts_model()
+    whisper_model = transcribe.get_whisper_model()
+    tts_was_loaded = tts_model.is_loaded()
+    whisper_was_loaded = whisper_model.is_loaded()
+
+    try:
+        if tts_was_loaded:
+            tts.unload_tts_model()
+        if whisper_was_loaded:
+            transcribe.unload_whisper_model()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Runtime reset failed: {e}") from e
+
+    logger.warning(
+        "Runtime reset requested: cancelled_story_renders=%s cleared_generations=%s",
+        len(cancelled_story_render_ids),
+        len(cleared_generation_ids),
+        extra={"tags": ["runtime", "control", "reset"]},
+    )
+    return models.RuntimeResetResponse(
+        message="Runtime reset requested. Active renders are being cancelled and loaded models were unloaded.",
+        cancelled_story_render_ids=cancelled_story_render_ids,
+        cleared_generation_ids=cleared_generation_ids,
+        tts_was_loaded=tts_was_loaded,
+        whisper_was_loaded=whisper_was_loaded,
+    )
+
+
 # ============================================
 # STARTUP & SHUTDOWN
 # ============================================
@@ -2535,6 +2723,11 @@ async def startup_event():
     logger.info("voicebox API starting up...")
     logger.info("Colab profile: %s", SETTINGS.colab_profile)
     logger.info("API key protection enabled: %s", bool(SETTINGS.api_key))
+    logger.info("TTS provider: %s", "qwen_local")
+    logger.info(
+        "STT provider: %s",
+        "groq_remote" if _resolve_stt_provider() == "groq" else "whisper_local",
+    )
     database.init_db()
     logger.info("Database initialized at %s", database._db_path)
     backend_type = get_backend_type()

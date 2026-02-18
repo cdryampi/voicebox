@@ -120,6 +120,10 @@ export function DashboardTab() {
                   <div>GPU type: {healthQuery.data?.gpu_type ?? 'n/a'}</div>
                   <div>CUDA device: {runtimeQuery.data?.torch_cuda_device ?? 'n/a'}</div>
                   <div>TTS loaded: {runtimeQuery.data?.tts_loaded ? 'yes' : 'no'}</div>
+                  <div>
+                    STT provider:{' '}
+                    {runtimeQuery.data?.stt_provider === 'groq' ? 'Groq remote' : 'Whisper local'}
+                  </div>
                   <div>Torch dtype: {runtimeQuery.data?.tts_torch_dtype ?? 'n/a'}</div>
                 </div>
                 <div className="text-xs text-muted-foreground">
@@ -182,10 +186,18 @@ export function DashboardTab() {
             ) : (
               <>
                 <div>TTS loaded: {runtimeModelsQuery.data?.tts_loaded_model_size ?? 'none'}</div>
-                <div>Whisper loaded: {runtimeModelsQuery.data?.whisper_loaded_model_size ?? 'none'}</div>
+                <div>
+                  Whisper loaded:{' '}
+                  {runtimeQuery.data?.stt_provider === 'groq'
+                    ? 'disabled (remote STT)'
+                    : runtimeModelsQuery.data?.whisper_loaded_model_size ?? 'none'}
+                </div>
                 <div>Default TTS: {modelDefaultsQuery.data?.default_tts_model_size ?? 'unknown'}</div>
                 <div>
-                  Default Whisper: {modelDefaultsQuery.data?.default_whisper_model_size ?? 'unknown'}
+                  Default Whisper:{' '}
+                  {runtimeQuery.data?.stt_provider === 'groq'
+                    ? 'not used in this runtime'
+                    : modelDefaultsQuery.data?.default_whisper_model_size ?? 'unknown'}
                 </div>
                 <div className="text-xs text-muted-foreground">
                   Downloaded models: {downloadedModelsCount} · Loaded models: {loadedModelsCount}

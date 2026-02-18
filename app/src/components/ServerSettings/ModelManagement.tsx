@@ -223,6 +223,7 @@ export function ModelManagement() {
   const modelOperationLabel = isModelOperationBusy
     ? `${tasksSummary?.model_op_kind ?? 'operation'} ${tasksSummary?.model_op_model_name ?? ''}`.trim()
     : null;
+  const isRemoteStt = runtimeInfo?.stt_provider === 'groq' && runtimeInfo?.colab_profile;
 
   return (
     <div className="space-y-4">
@@ -235,10 +236,16 @@ export function ModelManagement() {
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-4">
-        {runtimeInfo?.colab_profile && runtimeInfo.torch_cuda_available && (
+        {runtimeInfo?.colab_profile && runtimeInfo.torch_cuda_available && !isRemoteStt && (
           <div className="rounded-lg border border-amber-300/50 bg-amber-50/30 p-3 text-sm text-amber-800 dark:text-amber-200">
             Colab CUDA mode: load models one by one. Activating Whisper unloads Qwen TTS and vice
             versa to avoid VRAM crashes.
+          </div>
+        )}
+        {isRemoteStt && (
+          <div className="rounded-lg border border-cyan-300/50 bg-cyan-50/30 p-3 text-sm text-cyan-800 dark:text-cyan-200">
+            Remote STT mode is active: transcription runs via Groq. Whisper local models are disabled
+            in this Colab profile.
           </div>
         )}
         {isModelOperationBusy && (
@@ -293,7 +300,8 @@ export function ModelManagement() {
                       onActivate={() => handleActivate(model.model_name)}
                       isDownloading={downloadingModel === model.model_name}
                       isActivating={activatingModel === model.model_name}
-                      disableActions={isModelOperationBusy}
+                      disableActions={isModelOperationBusy || !!model.disabled}
+                      disableReason={model.disabled_reason}
                       formatSize={formatSize}
                     />
                   ))}
@@ -324,7 +332,8 @@ export function ModelManagement() {
                       onActivate={() => handleActivate(model.model_name)}
                       isDownloading={downloadingModel === model.model_name}
                       isActivating={activatingModel === model.model_name}
-                      disableActions={isModelOperationBusy}
+                      disableActions={isModelOperationBusy || !!model.disabled}
+                      disableReason={model.disabled_reason}
                       formatSize={formatSize}
                     />
                   ))}
@@ -384,16 +393,19 @@ interface ModelItemProps {
     model_name: string;
     display_name: string;
     downloaded: boolean;
-    downloading?: boolean;  // From server - true if download in progress
+    downloading?: boolean; // From server - true if download in progress
     size_mb?: number;
     loaded: boolean;
+    disabled?: boolean;
+    disabled_reason?: string;
   };
   onDownload: () => void;
   onDelete: () => void;
   onActivate: () => void;
-  isDownloading: boolean;  // Local state - true if user just clicked download
+  isDownloading: boolean; // Local state - true if user just clicked download
   isActivating: boolean;
   disableActions?: boolean;
+  disableReason?: string;
   formatSize: (sizeMb?: number) => string;
 }
 
@@ -405,6 +417,7 @@ function ModelItem({
   isDownloading,
   isActivating,
   disableActions = false,
+  disableReason,
   formatSize,
 }: ModelItemProps) {
   // Use server's downloading state OR local state (for immediate feedback before server updates)
@@ -426,11 +439,19 @@ function ModelItem({
               Downloaded
             </Badge>
           )}
+          {model.disabled && (
+            <Badge variant="outline" className="text-xs">
+              Disabled
+            </Badge>
+          )}
         </div>
         {model.downloaded && model.size_mb && !showDownloading && (
           <div className="text-xs text-muted-foreground mt-1">
             Size: {formatSize(model.size_mb)}
           </div>
+        )}
+        {disableReason && (
+          <div className="text-xs text-muted-foreground mt-1">{disableReason}</div>
         )}
       </div>
       <div className="flex items-center gap-2">

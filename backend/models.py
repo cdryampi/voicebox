@@ -152,6 +152,8 @@ class TranscriptionResponse(BaseModel):
     """Response model for transcription."""
     text: str
     duration: float
+    provider: Literal["groq", "whisper_local"] = "whisper_local"
+    provider_model: Optional[str] = None
 
 
 class HealthResponse(BaseModel):
@@ -174,6 +176,8 @@ class ModelStatus(BaseModel):
     downloading: bool = False  # True if download is in progress
     size_mb: Optional[float] = None
     loaded: bool = False
+    disabled: bool = False
+    disabled_reason: Optional[str] = None
 
 
 class ModelStatusListResponse(BaseModel):
@@ -291,6 +295,22 @@ class TaskEventsResponse(BaseModel):
     """Incremental terminal task event feed."""
     events: List[TaskTerminalEvent] = Field(default_factory=list)
     last_id: int = 0
+
+
+class TaskCancelStoryRendersResponse(BaseModel):
+    """Result for story render cancellation control endpoint."""
+    cancelled_job_ids: List[str] = Field(default_factory=list)
+    active_before: int = 0
+    message: str
+
+
+class RuntimeResetResponse(BaseModel):
+    """Result for runtime reset control endpoint."""
+    message: str
+    cancelled_story_render_ids: List[str] = Field(default_factory=list)
+    cleared_generation_ids: List[str] = Field(default_factory=list)
+    tts_was_loaded: bool = False
+    whisper_was_loaded: bool = False
 
 
 class AudioChannelCreate(BaseModel):

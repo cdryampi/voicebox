@@ -4,6 +4,8 @@ import type {
   ActiveTasksResponse,
   ActiveTasksSummaryResponse,
   TaskEventsResponse,
+  TaskCancelStoryRendersResponse,
+  RuntimeResetResponse,
   CapabilitiesResponse,
   GenerationRequest,
   GenerationResponse,
@@ -143,10 +145,28 @@ class ApiClient {
     const response = await this.fetchWithAuth(url);
 
     if (!response.ok) {
-      const error = await response.json().catch(() => ({
-        detail: response.statusText,
-      }));
-      throw new Error(error.detail || `HTTP error! status: ${response.status}`);
+      const payload = await response.text();
+      let detail = response.statusText || `HTTP error! status: ${response.status}`;
+      let errorCode: string | undefined;
+      try {
+        const parsed = JSON.parse(payload) as {
+          detail?: string | { message?: string; error_code?: string };
+          error_code?: string;
+        };
+        if (typeof parsed?.detail === 'string') {
+          detail = parsed.detail;
+        } else if (parsed?.detail && typeof parsed.detail === 'object') {
+          detail = parsed.detail.message || JSON.stringify(parsed.detail);
+          if (parsed.detail.error_code) errorCode = parsed.detail.error_code;
+        }
+        if (parsed?.error_code) errorCode = parsed.error_code;
+      } catch {
+        if (payload.trim()) detail = payload;
+      }
+      const error = new Error(detail) as Error & { status?: number; errorCode?: string };
+      error.status = response.status;
+      error.errorCode = errorCode;
+      throw error;
     }
 
     const contentType = response.headers.get('content-type') || '';
@@ -595,10 +615,28 @@ class ApiClient {
     });
 
     if (!response.ok) {
-      const error = await response.json().catch(() => ({
-        detail: response.statusText,
-      }));
-      throw new Error(error.detail || `HTTP error! status: ${response.status}`);
+      const payload = await response.text();
+      let detail = response.statusText || `HTTP error! status: ${response.status}`;
+      let errorCode: string | undefined;
+      try {
+        const parsed = JSON.parse(payload) as {
+          detail?: string | { message?: string; error_code?: string };
+          error_code?: string;
+        };
+        if (typeof parsed?.detail === 'string') {
+          detail = parsed.detail;
+        } else if (parsed?.detail && typeof parsed.detail === 'object') {
+          detail = parsed.detail.message || JSON.stringify(parsed.detail);
+          if (parsed.detail.error_code) errorCode = parsed.detail.error_code;
+        }
+        if (parsed?.error_code) errorCode = parsed.error_code;
+      } catch {
+        if (payload.trim()) detail = payload;
+      }
+      const error = new Error(detail) as Error & { status?: number; errorCode?: string };
+      error.status = response.status;
+      error.errorCode = errorCode;
+      throw error;
     }
 
     return response.json();
@@ -659,6 +697,24 @@ class ApiClient {
     if (typeof query?.since_id === 'number') params.append('since_id', query.since_id.toString());
     const qs = params.toString();
     return this.request<TaskEventsResponse>(qs ? `/tasks/events?${qs}` : '/tasks/events');
+  }
+
+  async cancelStoryRenderJob(jobId: string): Promise<TaskCancelStoryRendersResponse> {
+    return this.request<TaskCancelStoryRendersResponse>(`/stories/jobs/${jobId}/cancel`, {
+      method: 'POST',
+    });
+  }
+
+  async cancelAllStoryRenders(): Promise<TaskCancelStoryRendersResponse> {
+    return this.request<TaskCancelStoryRendersResponse>('/tasks/story-renders/cancel', {
+      method: 'POST',
+    });
+  }
+
+  async resetRuntime(): Promise<RuntimeResetResponse> {
+    return this.request<RuntimeResetResponse>('/server/runtime/reset', {
+      method: 'POST',
+    });
   }
 
   // Audio Channels

@@ -54,6 +54,9 @@ class BackendSettings:
     groq_model: str
     groq_models: List[str]
     groq_timeout_seconds: int
+    stt_provider: str
+    stt_remote_no_fallback: bool
+    groq_stt_model: str
     default_model_size: str
     default_whisper_model_size: str
     db_pool_size: int
@@ -115,6 +118,22 @@ def load_settings() -> BackendSettings:
     if groq_model not in groq_models:
         groq_models = [groq_model, *groq_models]
 
+    default_stt_provider = "groq" if colab_profile else "whisper_local"
+    stt_provider = os.getenv("VOICEBOX_STT_PROVIDER", default_stt_provider).strip().lower()
+    if stt_provider not in {"groq", "whisper_local"}:
+        stt_provider = default_stt_provider
+    # In Colab/T4 we enforce remote STT to avoid CUDA churn with Whisper.
+    if colab_profile:
+        stt_provider = "groq"
+
+    stt_remote_no_fallback = _parse_bool(
+        os.getenv("VOICEBOX_STT_REMOTE_NO_FALLBACK"),
+        default=colab_profile,
+    )
+    groq_stt_model = os.getenv("VOICEBOX_GROQ_STT_MODEL", "whisper-large-v3-turbo").strip()
+    if not groq_stt_model:
+        groq_stt_model = "whisper-large-v3-turbo"
+
     return BackendSettings(
         api_key=os.getenv("VOICEBOX_API_KEY"),
         allowed_origins=allowed_origins,
@@ -127,6 +146,9 @@ def load_settings() -> BackendSettings:
         groq_model=groq_model,
         groq_models=groq_models,
         groq_timeout_seconds=int(os.getenv("VOICEBOX_GROQ_TIMEOUT_SECONDS", "20")),
+        stt_provider=stt_provider,
+        stt_remote_no_fallback=stt_remote_no_fallback,
+        groq_stt_model=groq_stt_model,
         default_model_size=os.getenv("VOICEBOX_DEFAULT_MODEL_SIZE", default_model_size),
         default_whisper_model_size=default_whisper_model_size,
         db_pool_size=_parse_int(

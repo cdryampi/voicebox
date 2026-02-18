@@ -104,6 +104,8 @@ export interface TranscriptionRequest {
 export interface TranscriptionResponse {
   text: string;
   duration: number;
+  provider: 'groq' | 'whisper_local';
+  provider_model?: string;
 }
 
 export interface HealthResponse {
@@ -122,6 +124,9 @@ export interface RuntimeInfoResponse {
   host: string;
   port: number;
   colab_profile: boolean;
+  stt_provider: 'groq' | 'whisper_local';
+  stt_remote_enabled: boolean;
+  stt_fallback_local_enabled: boolean;
   default_model_size: '1.7B' | '0.6B';
   default_whisper_model_size: 'base' | 'small' | 'medium' | 'large';
   torch_cuda_available: boolean;
@@ -176,6 +181,8 @@ export interface ModelStatus {
   downloading: boolean; // True if download is in progress
   size_mb?: number;
   loaded: boolean;
+  disabled?: boolean;
+  disabled_reason?: string;
 }
 
 export interface ModelStatusListResponse {
@@ -231,6 +238,20 @@ export interface TaskTerminalEvent {
 export interface TaskEventsResponse {
   events: TaskTerminalEvent[];
   last_id: number;
+}
+
+export interface TaskCancelStoryRendersResponse {
+  cancelled_job_ids: string[];
+  active_before: number;
+  message: string;
+}
+
+export interface RuntimeResetResponse {
+  message: string;
+  cancelled_story_render_ids: string[];
+  cleared_generation_ids: string[];
+  tts_was_loaded: boolean;
+  whisper_was_loaded: boolean;
 }
 
 export interface CapabilitiesResponse {

@@ -604,6 +604,7 @@ async def create_studio_draft(
             character_descriptions=character_descriptions,
             character_emotion_palettes=character_emotion_palettes,
             target_lines=limits.max_lines,
+            max_chars_per_line=limits.max_chars_per_line,
             model=llm_model,
         )
     except GroqAPIError as e:

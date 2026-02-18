@@ -1,8 +1,11 @@
 import { Link } from '@tanstack/react-router';
+import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { AlertTriangle, Loader2, ServerCrash, ServerIcon, Sparkles } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
+import { useToast } from '@/components/ui/use-toast';
+import { apiClient } from '@/lib/api/client';
 import { useNotifier } from '@/lib/hooks/useNotifier';
 import { useGlobalTaskActivityStore } from '@/stores/globalTaskActivityStore';
 
@@ -27,9 +30,57 @@ export function GlobalStatusTopbar() {
   const lastTerminalEvent = useGlobalTaskActivityStore((state) => state.lastTerminalEvent);
   const modelOperation = useGlobalTaskActivityStore((state) => state.modelOperation);
   const { notify } = useNotifier();
+  const { toast } = useToast();
+  const queryClient = useQueryClient();
 
   const [isExpanded, setIsExpanded] = useState(false);
   const previousConnectionStateRef = useRef(connectionState);
+  const lastNotifiedTerminalIdRef = useRef(
+    useGlobalTaskActivityStore.getState().lastTerminalEvent?.id ?? 0,
+  );
+
+  const cancelRendersMutation = useMutation({
+    mutationFn: () => apiClient.cancelAllStoryRenders(),
+    onSuccess: async (result) => {
+      toast({
+        title: 'Render cancellation requested',
+        description: result.message,
+      });
+      await queryClient.invalidateQueries({ queryKey: ['tasksSummary'] });
+      await queryClient.invalidateQueries({ queryKey: ['activeTasks'] });
+      await queryClient.invalidateQueries({ queryKey: ['taskEvents'] });
+    },
+    onError: (error) => {
+      toast({
+        title: 'Cancel failed',
+        description: error instanceof Error ? error.message : 'Unknown error',
+        variant: 'destructive',
+      });
+    },
+  });
+
+  const resetRuntimeMutation = useMutation({
+    mutationFn: () => apiClient.resetRuntime(),
+    onSuccess: async (result) => {
+      toast({
+        title: 'Runtime reset requested',
+        description: result.message,
+      });
+      await queryClient.invalidateQueries({ queryKey: ['tasksSummary'] });
+      await queryClient.invalidateQueries({ queryKey: ['activeTasks'] });
+      await queryClient.invalidateQueries({ queryKey: ['taskEvents'] });
+      await queryClient.invalidateQueries({ queryKey: ['modelStatus'] });
+      await queryClient.invalidateQueries({ queryKey: ['runtimeModels'] });
+      await queryClient.invalidateQueries({ queryKey: ['runtimeInfo'] });
+    },
+    onError: (error) => {
+      toast({
+        title: 'Runtime reset failed',
+        description: error instanceof Error ? error.message : 'Unknown error',
+        variant: 'destructive',
+      });
+    },
+  });
 
   useEffect(() => {
     const shouldExpand =
@@ -63,6 +114,32 @@ export function GlobalStatusTopbar() {
     }
     previousConnectionStateRef.current = connectionState;
   }, [connectionState, notify]);
+
+  useEffect(() => {
+    if (!lastTerminalEvent) return;
+    if (lastTerminalEvent.id <= lastNotifiedTerminalIdRef.current) return;
+    lastNotifiedTerminalIdRef.current = lastTerminalEvent.id;
+    if (lastTerminalEvent.kind !== 'generation') return;
+
+    if (lastTerminalEvent.state === 'completed') {
+      void notify({
+        kind: 'completion',
+        title: 'Audio generation completed',
+        body: lastTerminalEvent.message,
+        tag: `global-task:generation:${lastTerminalEvent.entity_id}:completed`,
+        fallbackToToast: true,
+      });
+      return;
+    }
+
+    void notify({
+      kind: 'error',
+      title: 'Audio generation failed',
+      body: lastTerminalEvent.message,
+      tag: `global-task:generation:${lastTerminalEvent.entity_id}:failed`,
+      fallbackToToast: true,
+    });
+  }, [lastTerminalEvent, notify]);
 
   const isBusy = hasActiveTasks || modelOperation.busy;
   const stateColorClass =
@@ -120,6 +197,32 @@ export function GlobalStatusTopbar() {
             </Button>
             <Button size="sm" variant="ghost" asChild className="h-7 px-2 text-xs">
               <Link to="/server">Server</Link>
+            </Button>
+            <Button
+              size="sm"
+              variant="ghost"
+              className="h-7 px-2 text-xs"
+              onClick={() => cancelRendersMutation.mutate()}
+              disabled={
+                cancelRendersMutation.isPending ||
+                !activeCounts.storyRenders ||
+                connectionState === 'disconnected'
+              }
+            >
+              {cancelRendersMutation.isPending ? 'Cancelling…' : 'Cancel Renders'}
+            </Button>
+            <Button
+              size="sm"
+              variant="ghost"
+              className="h-7 px-2 text-xs"
+              onClick={() => resetRuntimeMutation.mutate()}
+              disabled={
+                resetRuntimeMutation.isPending ||
+                connectionState === 'disconnected' ||
+                modelOperation.busy
+              }
+            >
+              {resetRuntimeMutation.isPending ? 'Resetting…' : 'Reset Runtime'}
             </Button>
           </div>
         </div>

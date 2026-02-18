@@ -2,12 +2,17 @@
 
 Use `voicebox_t4_deploy.example.ipynb` as the versioned template to run the full Voicebox backend in Google Colab, so Colab handles all Qwen3-TTS audio generation.
 
+This Colab profile is now **Qwen-only for TTS** and uses **Groq remote STT** for transcription.
+
 ## What the notebook configures
 
 - `VOICEBOX_COLAB_PROFILE=true`
 - `VOICEBOX_HOST=0.0.0.0`
 - `VOICEBOX_PORT=17493`
-- `VOICEBOX_DEFAULT_MODEL_SIZE=0.6B`
+- `VOICEBOX_DEFAULT_MODEL_SIZE=1.7B`
+- `VOICEBOX_STT_PROVIDER=groq`
+- `VOICEBOX_STT_REMOTE_NO_FALLBACK=true`
+- `VOICEBOX_GROQ_STT_MODEL=whisper-large-v3-turbo`
 - `VOICEBOX_DB_USE_NULL_POOL=true` (recommended for SQLite in Colab)
 - `VOICEBOX_ALLOWED_ORIGINS=http://localhost:5174,http://127.0.0.1:5174`
 - `VOICEBOX_API_KEY` for remote protection
@@ -28,6 +33,7 @@ The notebook prints:
 - public ngrok URL
 - ready-to-copy API key reminder
 - smoke test results for `/health`, `/runtime`, `/models/status`
+- optional STT smoke test via `/transcribe` (Groq provider)
 
 ## Connect from Voicebox app
 
@@ -52,3 +58,5 @@ The notebook prints:
 - If you get `RuntimeError: Backend did not become ready in time`, check `/tmp/voicebox_backend.log` in Colab output.
 - Ensure `REPO_REF` points to a branch containing backend runtime files (`backend/settings.py`, `backend/studio_drafts.py`, `backend/utils/groq.py`).
 - Re-run install cell after changing `REPO_REF` to avoid stale dependencies.
+- If whisper model operations return `STT_REMOTE_ONLY`, this is expected in Colab profile (STT is remote via Groq).
+- If `/transcribe` fails, verify `VOICEBOX_GROQ_API_KEY` and `VOICEBOX_GROQ_STT_MODEL`.

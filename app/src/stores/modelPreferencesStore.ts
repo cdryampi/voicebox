@@ -15,7 +15,7 @@ export const useModelPreferencesStore = create<ModelPreferencesStore>()(
   persist(
     (set) => ({
       defaultTtsModelSize: '1.7B',
-      setDefaultTtsModelSize: () => set({ defaultTtsModelSize: '1.7B' }),
+      setDefaultTtsModelSize: (modelSize) => set({ defaultTtsModelSize: modelSize }),
       defaultWhisperModelSize: 'base',
       setDefaultWhisperModelSize: (modelSize) => set({ defaultWhisperModelSize: modelSize }),
     }),

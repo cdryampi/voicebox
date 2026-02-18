@@ -8,12 +8,22 @@ import json
 import time
 from typing import Optional, Any
 from urllib import request, error
+import requests as http_requests
 
 from ..settings import BackendSettings
 
 
 class GroqAPIError(Exception):
     """Raised when a Groq API call fails or returns an invalid response."""
+
+
+class GroqSTTError(Exception):
+    """Raised for Groq STT (audio transcription) failures with stable error metadata."""
+
+    def __init__(self, message: str, error_code: str, status_code: int = 503):
+        super().__init__(message)
+        self.error_code = error_code
+        self.status_code = status_code
 
 
 _GROQ_MODELS_CACHE: dict[str, Any] = {
@@ -31,6 +41,107 @@ def _groq_headers(settings: BackendSettings) -> dict[str, str]:
         "Accept": "application/json",
         "Authorization": f"Bearer {settings.groq_api_key}",
     }
+
+
+def _extract_error_message(payload: Any) -> Optional[str]:
+    if isinstance(payload, dict):
+        err = payload.get("error")
+        if isinstance(err, dict):
+            msg = err.get("message")
+            if isinstance(msg, str) and msg.strip():
+                return msg.strip()
+        msg = payload.get("message")
+        if isinstance(msg, str) and msg.strip():
+            return msg.strip()
+    return None
+
+
+def transcribe_audio_with_groq(
+    settings: BackendSettings,
+    *,
+    audio_path: str,
+    language: Optional[str] = None,
+    model: Optional[str] = None,
+) -> str:
+    """
+    Transcribe audio with Groq audio transcription API.
+    """
+    if not settings.groq_api_key:
+        raise GroqSTTError(
+            "Groq STT is not configured. Set VOICEBOX_GROQ_API_KEY (or GROQ_API_KEY).",
+            error_code="STT_PROVIDER_NOT_CONFIGURED",
+            status_code=503,
+        )
+
+    target_model = (model or settings.groq_stt_model or "whisper-large-v3-turbo").strip()
+    if not target_model:
+        raise GroqSTTError(
+            "Groq STT model is not configured. Set VOICEBOX_GROQ_STT_MODEL.",
+            error_code="STT_PROVIDER_NOT_CONFIGURED",
+            status_code=503,
+        )
+
+    data: dict[str, str] = {
+        "model": target_model,
+        "response_format": "json",
+    }
+    if language:
+        data["language"] = language
+
+    headers = {
+        "Authorization": f"Bearer {settings.groq_api_key}",
+        "User-Agent": "curl/8.5.0",
+        "Accept": "application/json",
+    }
+
+    try:
+        with open(audio_path, "rb") as fp:
+            response = http_requests.post(
+                "https://api.groq.com/openai/v1/audio/transcriptions",
+                headers=headers,
+                data=data,
+                files={"file": (audio_path.split("/")[-1], fp, "audio/wav")},
+                timeout=settings.groq_timeout_seconds,
+            )
+    except http_requests.Timeout as e:
+        raise GroqSTTError(
+            "Groq STT timeout. Retry in a moment.",
+            error_code="STT_PROVIDER_TIMEOUT",
+            status_code=503,
+        ) from e
+    except http_requests.RequestException as e:
+        raise GroqSTTError(
+            f"Groq STT network error: {e}",
+            error_code="STT_PROVIDER_NETWORK_ERROR",
+            status_code=503,
+        ) from e
+
+    payload: Any
+    try:
+        payload = response.json()
+    except Exception:
+        payload = {"message": response.text[:400] if response.text else ""}
+
+    if response.status_code == 429:
+        message = _extract_error_message(payload) or "Groq STT rate limit exceeded."
+        raise GroqSTTError(message, error_code="STT_PROVIDER_RATE_LIMIT", status_code=429)
+
+    if response.status_code in {401, 403}:
+        message = _extract_error_message(payload) or "Groq STT authentication failed."
+        raise GroqSTTError(message, error_code="STT_PROVIDER_NOT_CONFIGURED", status_code=503)
+
+    if response.status_code >= 400:
+        message = _extract_error_message(payload) or f"Groq STT failed with HTTP {response.status_code}."
+        raise GroqSTTError(message, error_code="STT_PROVIDER_ERROR", status_code=503)
+
+    text = payload.get("text") if isinstance(payload, dict) else None
+    if not isinstance(text, str) or not text.strip():
+        raise GroqSTTError(
+            "Groq STT returned an empty transcription.",
+            error_code="STT_PROVIDER_ERROR",
+            status_code=503,
+        )
+    return text.strip()
 
 
 def list_available_groq_models(
@@ -194,6 +305,7 @@ def compose_story_lines_with_groq(
     character_descriptions: Optional[dict[str, str]] = None,
     character_emotion_palettes: Optional[dict[str, list[str]]] = None,
     target_lines: int,
+    max_chars_per_line: Optional[int] = None,
     model: Optional[str] = None,
 ) -> list[dict[str, Any]]:
     """
@@ -216,6 +328,11 @@ def compose_story_lines_with_groq(
         "You create audio drama scripts. "
         "Return strict JSON only, no markdown, no extra text."
     )
+    max_chars_instruction = (
+        f"Max chars per line: {max(20, int(max_chars_per_line))}\n"
+        if max_chars_per_line is not None
+        else ""
+    )
     user = (
         f"Mode: {mode}\n"
         f"Language: {language}\n"
@@ -223,6 +340,7 @@ def compose_story_lines_with_groq(
         f"Character personalities:\n{personality_block}\n"
         "IMPORTANT: For each line, emotion must be chosen from the character's allowed_emotions.\n"
         f"Target lines: {target_lines}\n"
+        f"{max_chars_instruction}"
         f"Prompt: {prompt}\n\n"
         "Output JSON schema:\n"
         "{\n"
@@ -237,16 +355,21 @@ def compose_story_lines_with_groq(
         "}\n"
     )
 
-    max_tokens = min(6000, max(1200, target_lines * 160))
+    max_tokens = min(7000, max(1400, target_lines * 220))
     last_error = "Unknown Groq compose error"
 
     for attempt in range(2):
         extra = ""
         if attempt == 1:
+            retry_line_rule = (
+                f"- Keep each text line <= {max(20, int(max_chars_per_line))} characters.\n"
+                if max_chars_per_line is not None
+                else ""
+            )
             extra = (
                 "\nIMPORTANT RETRY RULES:\n"
                 "- Output must be valid JSON.\n"
-                "- Keep each text line short (max 20 words).\n"
+                f"{retry_line_rule}"
                 "- Do not add explanations.\n"
             )
 

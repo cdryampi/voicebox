@@ -27,10 +27,16 @@ export function ModelDefaults() {
     queryFn: () => apiClient.getModelDefaults(),
     staleTime: 30000,
   });
+  const runtimeInfoQuery = useQuery({
+    queryKey: ['runtimeInfoForDefaults'],
+    queryFn: () => apiClient.getRuntimeInfo(),
+    staleTime: 10000,
+  });
+  const isRemoteStt = runtimeInfoQuery.data?.stt_provider === 'groq' && runtimeInfoQuery.data?.colab_profile;
 
   useEffect(() => {
     if (!defaultsQuery.data) return;
-    setDefaultTtsModelSize();
+    setDefaultTtsModelSize(defaultsQuery.data.default_tts_model_size);
     setDefaultWhisperModelSize(defaultsQuery.data.default_whisper_model_size);
   }, [defaultsQuery.data, setDefaultTtsModelSize, setDefaultWhisperModelSize]);
 
@@ -41,7 +47,7 @@ export function ModelDefaults() {
         default_whisper_model_size: defaultWhisperModelSize,
       }),
     onSuccess: async (saved) => {
-      setDefaultTtsModelSize();
+      setDefaultTtsModelSize(saved.default_tts_model_size);
       setDefaultWhisperModelSize(saved.default_whisper_model_size);
       toast({
         title: 'Defaults saved',
@@ -62,12 +68,16 @@ export function ModelDefaults() {
   const loadDefaults = useMutation({
     mutationFn: async () => {
       await apiClient.triggerModelDownload('qwen-tts-1.7B');
-      await apiClient.triggerModelDownload(`whisper-${defaultWhisperModelSize}`);
+      if (!isRemoteStt) {
+        await apiClient.triggerModelDownload(`whisper-${defaultWhisperModelSize}`);
+      }
     },
     onSuccess: async () => {
       toast({
         title: 'Default models queued',
-        description: `Loading qwen-tts-1.7B and whisper-${defaultWhisperModelSize}.`,
+        description: isRemoteStt
+          ? 'Loading qwen-tts-1.7B. Transcription uses Groq remote STT in this environment.'
+          : `Loading qwen-tts-1.7B and whisper-${defaultWhisperModelSize}.`,
       });
       await queryClient.invalidateQueries({ queryKey: ['modelStatus'] });
     },
@@ -96,7 +106,7 @@ export function ModelDefaults() {
         )}
         <div className="space-y-1">
           <div className="text-xs text-muted-foreground">Voice Generation</div>
-          <Select value="1.7B" onValueChange={() => setDefaultTtsModelSize()}>
+          <Select value="1.7B" onValueChange={() => setDefaultTtsModelSize('1.7B')}>
             <SelectTrigger>
               <SelectValue />
             </SelectTrigger>
@@ -108,22 +118,28 @@ export function ModelDefaults() {
 
         <div className="space-y-1">
           <div className="text-xs text-muted-foreground">Transcription</div>
-          <Select
-            value={defaultWhisperModelSize}
-            onValueChange={(value) =>
-              setDefaultWhisperModelSize(value as 'base' | 'small' | 'medium' | 'large')
-            }
-          >
-            <SelectTrigger>
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="base">Whisper Base</SelectItem>
-              <SelectItem value="small">Whisper Small</SelectItem>
-              <SelectItem value="medium">Whisper Medium</SelectItem>
-              <SelectItem value="large">Whisper Large</SelectItem>
-            </SelectContent>
-          </Select>
+          {isRemoteStt ? (
+            <div className="rounded border px-3 py-2 text-sm text-muted-foreground">
+              Groq Remote STT ({runtimeInfoQuery.data?.stt_provider ?? 'groq'})
+            </div>
+          ) : (
+            <Select
+              value={defaultWhisperModelSize}
+              onValueChange={(value) =>
+                setDefaultWhisperModelSize(value as 'base' | 'small' | 'medium' | 'large')
+              }
+            >
+              <SelectTrigger>
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="base">Whisper Base</SelectItem>
+                <SelectItem value="small">Whisper Small</SelectItem>
+                <SelectItem value="medium">Whisper Medium</SelectItem>
+                <SelectItem value="large">Whisper Large</SelectItem>
+              </SelectContent>
+            </Select>
+          )}
         </div>
 
         <div className="flex items-end">

@@ -1113,6 +1113,7 @@ async def compose_story_with_groq(
             character_descriptions=character_descriptions,
             character_emotion_palettes=character_emotion_palettes,
             target_lines=data.target_lines,
+            max_chars_per_line=300,
             model=llm_model,
         )
     except GroqAPIError as e:
@@ -1349,6 +1350,8 @@ async def _run_story_render_job_background(
         return
     db = db_module.SessionLocal()
     errors: List[str] = []
+    cancelled = False
+    cancel_message = "Story render cancelled by operator."
 
     try:
         async with _STORY_RENDER_SEMAPHORE:
@@ -1383,6 +1386,10 @@ async def _run_story_render_job_background(
             processed_lines = 0
 
             for line_ref in script_lines:
+                if task_manager.is_story_render_cancel_requested(job_id):
+                    cancelled = True
+                    errors.append(cancel_message)
+                    break
                 line_id = line_ref.id
                 line = db.query(DBStoryScriptLine).filter_by(id=line_id).first()
                 if not line:
@@ -1488,8 +1495,27 @@ async def _run_story_render_job_background(
             if not job:
                 return
 
+            if cancelled:
+                # Mark any pending/running lines as failed with cancellation reason.
+                pending_lines = (
+                    db.query(DBStoryScriptLine)
+                    .filter_by(job_id=job_id)
+                    .filter(DBStoryScriptLine.status.in_(["queued", "running"]))
+                    .all()
+                )
+                for pending in pending_lines:
+                    pending.status = "failed"
+                    pending.error_message = cancel_message
+                    pending.updated_at = datetime.utcnow()
+                job.status = "failed"
+                job.failure_phase = "line_generation"
+                job.failure_code = "STORY_RENDER_CANCELLED"
+                job.error_summary = cancel_message
+
             failed_lines = sum(1 for line in script_lines if line.status == "failed")
-            if processed_lines == 0:
+            if cancelled:
+                pass
+            elif processed_lines == 0:
                 job.status = "failed"
                 job.failure_phase = "line_generation"
                 job.failure_code = "STORY_RENDER_LINE_FAILED"
@@ -1505,7 +1531,7 @@ async def _run_story_render_job_background(
             if errors:
                 job.error_summary = " | ".join(errors[:5])
 
-            if processed_lines > 0:
+            if processed_lines > 0 and not cancelled:
                 try:
                     audio_bytes = await export_story_audio(job.story_id, db)
                     if audio_bytes:
@@ -1553,6 +1579,7 @@ async def _run_story_render_job_background(
             error_code=_story_render_error_code(job_error),
         )
     finally:
+        task_manager.clear_story_render_cancel_request(job_id)
         db.close()
 
 

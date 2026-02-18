@@ -7,7 +7,7 @@ Production-quality FastAPI backend for Qwen3-TTS voice cloning.
 - ✅ **Voice Profile Management** - Create, update, delete voice profiles with multi-sample support
 - ✅ **Voice Cloning** - Generate speech using voice profiles with caching
 - ✅ **Generation History** - Full history tracking with search and filtering
-- ✅ **Transcription** - Whisper-based audio transcription
+- ✅ **Transcription** - Local Whisper or remote Groq STT (configurable)
 - ✅ **Multi-Sample Profiles** - Combine multiple reference samples for better quality
 - ✅ **Voice Prompt Caching** - Dual memory + disk caching for fast generation
 - ✅ **Audio Validation** - Automatic validation of reference audio quality
@@ -237,7 +237,10 @@ Environment variables introduced for remote/Colab profiles:
 - `VOICEBOX_PORT` (defaults to `17493`)
 - `VOICEBOX_DATA_DIR` (persistent storage path)
 - `VOICEBOX_COLAB_PROFILE` (`true/false`)
-- `VOICEBOX_DEFAULT_MODEL_SIZE` (defaults to `0.6B` in Colab profile, otherwise `1.7B`)
+- `VOICEBOX_DEFAULT_MODEL_SIZE` (defaults to `1.7B`)
+- `VOICEBOX_STT_PROVIDER` (`groq` or `whisper_local`; Colab profile forces `groq`)
+- `VOICEBOX_STT_REMOTE_NO_FALLBACK` (`true/false`; Colab profile defaults to `true`)
+- `VOICEBOX_GROQ_STT_MODEL` (default `whisper-large-v3-turbo`)
 - `VOICEBOX_USE_GROQ_INSTRUCT` (`true/false`, optional)
 - `VOICEBOX_GROQ_API_KEY` (or `GROQ_API_KEY`, optional)
 - `VOICEBOX_GROQ_MODEL` (optional)
