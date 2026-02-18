@@ -142,7 +142,8 @@ def _run_studio_render_preflight(
                 "STORY_RENDER_PREFLIGHT_LINE_TOO_LONG",
             )
 
-    model_size = draft.model_size or load_settings().default_model_size
+    settings = load_settings()
+    model_size = "1.7B" if settings.colab_profile else (draft.model_size or settings.default_model_size)
     if model_size not in {"0.6B", "1.7B"}:
         return False, f"Unsupported model size: {model_size}", "STORY_RENDER_PREFLIGHT_MODEL_INVALID"
 
@@ -878,7 +879,7 @@ async def generate_studio_line_preview(
 
     try:
         tts_model = tts.get_tts_model()
-        requested_model_size = draft.model_size or settings.default_model_size
+        requested_model_size = "1.7B" if settings.colab_profile else (draft.model_size or settings.default_model_size)
         await tts_model.load_model_async(requested_model_size)
 
         voice_prompt = await profiles.create_voice_prompt_for_profile(line.profile_id, db)
@@ -1017,7 +1018,7 @@ async def render_studio_draft_final(
         story_id=draft.story_id,
         name=draft.name,
         description=draft.description,
-        model_size=draft.model_size,
+        model_size="1.7B" if load_settings().colab_profile else draft.model_size,
         language=draft.language,
         gap_ms=draft.gap_ms,
         continue_on_error=False,

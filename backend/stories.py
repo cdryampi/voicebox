@@ -1369,7 +1369,7 @@ async def _run_story_render_job_background(
             db.commit()
 
             tts_model = tts.get_tts_model()
-            requested_model_size = model_size or settings.default_model_size
+            requested_model_size = "1.7B" if settings.colab_profile else (model_size or settings.default_model_size)
             await tts_model.load_model_async(requested_model_size)
 
             script_lines = (

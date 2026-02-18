@@ -87,7 +87,7 @@ def load_settings() -> BackendSettings:
             allowed_origins = ["*"]
 
     host_default = "0.0.0.0" if colab_profile else "127.0.0.1"
-    default_model_size = "0.6B" if colab_profile else "1.7B"
+    default_model_size = "1.7B"
     default_db_pool_size = 20 if colab_profile else 5
     default_db_max_overflow = 40 if colab_profile else 10
     default_db_pool_timeout = 120 if colab_profile else 30

@@ -417,9 +417,6 @@ export function FloatingGenerateBox({
                             <SelectItem value="1.7B" className="text-xs text-muted-foreground">
                               Qwen3-TTS 1.7B
                             </SelectItem>
-                            <SelectItem value="0.6B" className="text-xs text-muted-foreground">
-                              Qwen3-TTS 0.6B
-                            </SelectItem>
                           </SelectContent>
                         </Select>
                         <FormMessage className="text-xs" />

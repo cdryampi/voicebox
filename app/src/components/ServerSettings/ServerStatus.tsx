@@ -23,7 +23,6 @@ export function ServerStatus() {
         {/* Model download progress */}
         <div className="space-y-2">
           <ModelProgress modelName="qwen-tts-1.7B" displayName="Qwen TTS 1.7B" />
-          <ModelProgress modelName="qwen-tts-0.6B" displayName="Qwen TTS 0.6B" />
           <ModelProgress modelName="whisper-base" displayName="Whisper Base" />
           <ModelProgress modelName="whisper-small" displayName="Whisper Small" />
           <ModelProgress modelName="whisper-medium" displayName="Whisper Medium" />

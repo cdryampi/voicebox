@@ -140,10 +140,9 @@ export function GenerationForm() {
                       </FormControl>
                       <SelectContent>
                         <SelectItem value="1.7B">Qwen TTS 1.7B (Higher Quality)</SelectItem>
-                        <SelectItem value="0.6B">Qwen TTS 0.6B (Faster)</SelectItem>
                       </SelectContent>
                     </Select>
-                    <FormDescription>Larger models produce better quality</FormDescription>
+                    <FormDescription>Colab mode is pinned to 1.7B for stability</FormDescription>
                     <FormMessage />
                   </FormItem>
                 )}

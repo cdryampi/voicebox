@@ -94,6 +94,10 @@ export function StudioTab() {
   const selectedStoryId = useStoryStore((state) => state.selectedStoryId);
   const setSelectedStoryId = useStoryStore((state) => state.setSelectedStoryId);
   const modelOperation = useGlobalTaskActivityStore((state) => state.modelOperation);
+  const modelOpsBusy = modelOperation.busy;
+  const modelOpsLabel = modelOpsBusy
+    ? `${modelOperation.kind ?? 'operation'} ${modelOperation.modelName ?? ''}`.trim()
+    : '';
 
   const { data: stories } = useStories();
   const { data: profiles } = useProfiles();
@@ -122,7 +126,7 @@ export function StudioTab() {
   const [language, setLanguage] = useState<LanguageCode>('es');
   const [selectedModel, setSelectedModel] = useState<string>('');
   const [selectedIdeaModel, setSelectedIdeaModel] = useState<string>('');
-  const [selectedModelSize, setSelectedModelSize] = useState<'0.6B' | '1.7B'>('0.6B');
+  const [selectedModelSize, setSelectedModelSize] = useState<'0.6B' | '1.7B'>('1.7B');
   const [maxLines, setMaxLines] = useState(20);
   const [maxCharsPerLine, setMaxCharsPerLine] = useState(300);
   const [previewSeconds, setPreviewSeconds] = useState(5);
@@ -267,7 +271,7 @@ export function StudioTab() {
     setMode(draftDetail.mode);
     setLanguage(draftDetail.language);
     setSelectedModel(draftDetail.llm_model);
-    setSelectedModelSize((draftDetail.model_size as '0.6B' | '1.7B') ?? '0.6B');
+    setSelectedModelSize('1.7B');
     setMaxLines(draftDetail.limits_applied.max_lines);
     setMaxCharsPerLine(draftDetail.limits_applied.max_chars_per_line);
     setPreviewSeconds(draftDetail.limits_applied.preview_seconds);
@@ -437,7 +441,7 @@ export function StudioTab() {
     setMode(suggestion.mode);
     setLanguage(suggestion.language);
     if (suggestion.model_size) {
-      setSelectedModelSize(suggestion.model_size);
+      setSelectedModelSize('1.7B');
     }
     setMappings(nextMappings);
     setMaxLines(clampLimits(suggestion.limits.max_lines, 1, 80, 20));
@@ -772,10 +776,6 @@ export function StudioTab() {
 
   const characterOptions = mappings.map((m) => m.character_name);
   const charLimit = clampLimits(maxCharsPerLine, 20, 1500, 300);
-  const modelOpsBusy = modelOperation.busy;
-  const modelOpsLabel = modelOpsBusy
-    ? `${modelOperation.kind ?? 'operation'} ${modelOperation.modelName ?? ''}`.trim()
-    : '';
 
   return (
     <div className="flex h-full min-h-0 gap-6 overflow-hidden">
@@ -1121,13 +1121,12 @@ export function StudioTab() {
               </Select>
               <Select
                 value={selectedModelSize}
-                onValueChange={(value) => setSelectedModelSize(value as '0.6B' | '1.7B')}
+                onValueChange={() => setSelectedModelSize('1.7B')}
               >
                 <SelectTrigger>
                   <SelectValue placeholder="TTS model size" />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="0.6B">Qwen3-TTS 0.6B</SelectItem>
                   <SelectItem value="1.7B">Qwen3-TTS 1.7B</SelectItem>
                 </SelectContent>
               </Select>

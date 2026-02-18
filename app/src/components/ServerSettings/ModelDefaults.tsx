@@ -16,7 +16,6 @@ import { useModelPreferencesStore } from '@/stores/modelPreferencesStore';
 export function ModelDefaults() {
   const { toast } = useToast();
   const queryClient = useQueryClient();
-  const defaultTtsModelSize = useModelPreferencesStore((state) => state.defaultTtsModelSize);
   const setDefaultTtsModelSize = useModelPreferencesStore((state) => state.setDefaultTtsModelSize);
   const defaultWhisperModelSize = useModelPreferencesStore((state) => state.defaultWhisperModelSize);
   const setDefaultWhisperModelSize = useModelPreferencesStore(
@@ -31,18 +30,18 @@ export function ModelDefaults() {
 
   useEffect(() => {
     if (!defaultsQuery.data) return;
-    setDefaultTtsModelSize(defaultsQuery.data.default_tts_model_size);
+    setDefaultTtsModelSize();
     setDefaultWhisperModelSize(defaultsQuery.data.default_whisper_model_size);
   }, [defaultsQuery.data, setDefaultTtsModelSize, setDefaultWhisperModelSize]);
 
   const saveDefaults = useMutation({
     mutationFn: () =>
       apiClient.updateModelDefaults({
-        default_tts_model_size: defaultTtsModelSize,
+        default_tts_model_size: '1.7B',
         default_whisper_model_size: defaultWhisperModelSize,
       }),
     onSuccess: async (saved) => {
-      setDefaultTtsModelSize(saved.default_tts_model_size);
+      setDefaultTtsModelSize();
       setDefaultWhisperModelSize(saved.default_whisper_model_size);
       toast({
         title: 'Defaults saved',
@@ -62,13 +61,13 @@ export function ModelDefaults() {
 
   const loadDefaults = useMutation({
     mutationFn: async () => {
-      await apiClient.triggerModelDownload(`qwen-tts-${defaultTtsModelSize}`);
+      await apiClient.triggerModelDownload('qwen-tts-1.7B');
       await apiClient.triggerModelDownload(`whisper-${defaultWhisperModelSize}`);
     },
     onSuccess: async () => {
       toast({
         title: 'Default models queued',
-        description: `Loading qwen-tts-${defaultTtsModelSize} and whisper-${defaultWhisperModelSize}.`,
+        description: `Loading qwen-tts-1.7B and whisper-${defaultWhisperModelSize}.`,
       });
       await queryClient.invalidateQueries({ queryKey: ['modelStatus'] });
     },
@@ -97,16 +96,12 @@ export function ModelDefaults() {
         )}
         <div className="space-y-1">
           <div className="text-xs text-muted-foreground">Voice Generation</div>
-          <Select
-            value={defaultTtsModelSize}
-            onValueChange={(value) => setDefaultTtsModelSize(value as '1.7B' | '0.6B')}
-          >
+          <Select value="1.7B" onValueChange={() => setDefaultTtsModelSize()}>
             <SelectTrigger>
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
               <SelectItem value="1.7B">Qwen TTS 1.7B</SelectItem>
-              <SelectItem value="0.6B">Qwen TTS 0.6B</SelectItem>
             </SelectContent>
           </Select>
         </div>

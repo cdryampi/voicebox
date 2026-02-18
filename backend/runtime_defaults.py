@@ -50,6 +50,9 @@ def get_model_defaults(db: Session, settings: Optional[BackendSettings] = None) 
     # Guard against stale/invalid persisted values.
     if tts_default not in {"1.7B", "0.6B"}:
         tts_default = cfg.default_model_size if cfg.default_model_size in {"1.7B", "0.6B"} else "1.7B"
+    if cfg.colab_profile:
+        # Colab remote profile is pinned to 1.7B to avoid unstable CUDA switches.
+        tts_default = "1.7B"
     if whisper_default not in {"base", "small", "medium", "large"}:
         whisper_default = (
             cfg.default_whisper_model_size
@@ -67,7 +70,9 @@ def update_model_defaults(
     db: Session,
     data: ModelDefaultsUpdateRequest,
 ) -> ModelDefaultsResponse:
-    _upsert_setting_value(db, _KEY_DEFAULT_TTS_MODEL_SIZE, data.default_tts_model_size)
+    cfg = load_settings()
+    tts_default = "1.7B" if cfg.colab_profile else data.default_tts_model_size
+    _upsert_setting_value(db, _KEY_DEFAULT_TTS_MODEL_SIZE, tts_default)
     _upsert_setting_value(db, _KEY_DEFAULT_WHISPER_MODEL_SIZE, data.default_whisper_model_size)
     db.commit()
     return get_model_defaults(db)

@@ -9,14 +9,13 @@ import { useGeneration } from '@/lib/hooks/useGeneration';
 import { useModelDownloadToast } from '@/lib/hooks/useModelDownloadToast';
 import { useNotifier } from '@/lib/hooks/useNotifier';
 import { useGenerationStore } from '@/stores/generationStore';
-import { useModelPreferencesStore } from '@/stores/modelPreferencesStore';
 import { usePlayerStore } from '@/stores/playerStore';
 
 const generationSchema = z.object({
   text: z.string().min(1, 'Text is required').max(5000),
   language: z.enum(LANGUAGE_CODES as [LanguageCode, ...LanguageCode[]]),
   seed: z.number().int().optional(),
-  modelSize: z.enum(['1.7B', '0.6B']).optional(),
+  modelSize: z.literal('1.7B').optional(),
   instruct: z.string().max(500).optional(),
 });
 
@@ -32,7 +31,6 @@ export function useGenerationForm(options: UseGenerationFormOptions = {}) {
   const generation = useGeneration();
   const setAudioWithAutoPlay = usePlayerStore((state) => state.setAudioWithAutoPlay);
   const setIsGenerating = useGenerationStore((state) => state.setIsGenerating);
-  const defaultTtsModelSize = useModelPreferencesStore((state) => state.defaultTtsModelSize);
   const { notify } = useNotifier();
   const [downloadingModelName, setDownloadingModelName] = useState<string | null>(null);
   const [downloadingDisplayName, setDownloadingDisplayName] = useState<string | null>(null);
@@ -49,7 +47,7 @@ export function useGenerationForm(options: UseGenerationFormOptions = {}) {
       text: '',
       language: 'en',
       seed: undefined,
-      modelSize: defaultTtsModelSize,
+      modelSize: '1.7B',
       instruct: '',
       ...options.defaultValues,
     },
@@ -71,8 +69,8 @@ export function useGenerationForm(options: UseGenerationFormOptions = {}) {
     try {
       setIsGenerating(true);
 
-      const modelName = `qwen-tts-${data.modelSize}`;
-      const displayName = data.modelSize === '1.7B' ? 'Qwen TTS 1.7B' : 'Qwen TTS 0.6B';
+      const modelName = 'qwen-tts-1.7B';
+      const displayName = 'Qwen TTS 1.7B';
 
       try {
         const modelStatus = await apiClient.getModelStatus();
@@ -91,7 +89,7 @@ export function useGenerationForm(options: UseGenerationFormOptions = {}) {
         text: data.text,
         language: data.language,
         seed: data.seed,
-        model_size: data.modelSize,
+        model_size: '1.7B',
         instruct: data.instruct || undefined,
       });
 

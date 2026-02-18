@@ -276,7 +276,7 @@ export function ModelManagement() {
               </h3>
               <div className="space-y-2">
                 {modelStatus.models
-                  .filter((m) => m.model_name.startsWith('qwen-tts'))
+                  .filter((m) => m.model_name === 'qwen-tts-1.7B')
                   .map((model) => (
                     <ModelItem
                       key={model.model_name}

@@ -118,6 +118,26 @@ def _get_loaded_tts_model_size(tts_model) -> Optional[str]:
         return None
 
 
+def _resolve_runtime_tts_model_size(requested_model_size: Optional[str]) -> str:
+    """
+    Resolve TTS model size for runtime, pinning Colab/CUDA sessions to 1.7B.
+    This prevents model-switch churn that frequently leaves CUDA in an invalid state.
+    """
+    if _is_cuda_single_model_mode():
+        if requested_model_size and requested_model_size != "1.7B":
+            logger.warning(
+                "Ignoring requested TTS model_size=%s in Colab/CUDA mode; forcing 1.7B",
+                requested_model_size,
+                extra={"tags": ["models", "single_model_mode", "coerce_size"]},
+            )
+        return "1.7B"
+    if requested_model_size in {"1.7B", "0.6B"}:
+        return requested_model_size
+    if SETTINGS.default_model_size in {"1.7B", "0.6B"}:
+        return SETTINGS.default_model_size
+    return "1.7B"
+
+
 def _extract_error_message_and_code(detail: object) -> tuple[str, Optional[str]]:
     """Normalize FastAPI error detail payload into message + optional error code."""
     if isinstance(detail, str):
@@ -798,7 +818,7 @@ async def generate_speech(
 
         # Load the requested model size if different from current (async to not block)
         defaults = _get_runtime_model_defaults(db)
-        model_size = data.model_size or defaults.default_tts_model_size
+        model_size = _resolve_runtime_tts_model_size(data.model_size or defaults.default_tts_model_size)
 
         if _is_cuda_single_model_mode() and model_size == "1.7B":
             loaded_tts_size = _get_loaded_tts_model_size(tts_model)
@@ -1711,6 +1731,14 @@ async def activate_model(data: models.ModelDownloadRequest):
         }
         if model_name not in known_models:
             raise HTTPException(status_code=400, detail=f"Unknown model: {model_name}")
+        if _is_cuda_single_model_mode() and model_name == "qwen-tts-0.6B":
+            return JSONResponse(
+                status_code=409,
+                content={
+                    "detail": "Qwen TTS 0.6B is disabled in Colab/CUDA mode. Use Qwen TTS 1.7B.",
+                    "error_code": "MODEL_SIZE_DISABLED_IN_COLAB",
+                },
+            )
 
         if _is_cuda_single_model_mode() and model_name == "qwen-tts-1.7B":
             loaded_tts_size = _get_loaded_tts_model_size(tts.get_tts_model())
@@ -1969,6 +1997,8 @@ async def get_model_status():
             "check_loaded": lambda: check_whisper_loaded("large"),
         },
     ]
+    if _is_cuda_single_model_mode():
+        model_configs = [cfg for cfg in model_configs if cfg["model_name"] != "qwen-tts-0.6B"]
     
     # Build a mapping of model_name -> hf_repo_id so we can check if shared repos are downloading
     model_to_repo = {cfg["model_name"]: cfg["hf_repo_id"] for cfg in model_configs}
@@ -2155,6 +2185,14 @@ async def trigger_model_download(request: models.ModelDownloadRequest):
     
     if request.model_name not in model_configs:
         raise HTTPException(status_code=400, detail=f"Unknown model: {request.model_name}")
+    if _is_cuda_single_model_mode() and request.model_name == "qwen-tts-0.6B":
+        return JSONResponse(
+            status_code=409,
+            content={
+                "detail": "Qwen TTS 0.6B is disabled in Colab/CUDA mode. Use Qwen TTS 1.7B.",
+                "error_code": "MODEL_SIZE_DISABLED_IN_COLAB",
+            },
+        )
 
     if not task_manager.start_model_operation("download", request.model_name):
         return _model_operation_conflict_response(task_manager, "download", request.model_name)
@@ -2262,6 +2300,14 @@ async def delete_model(model_name: str):
     
     if model_name not in model_configs:
         raise HTTPException(status_code=400, detail=f"Unknown model: {model_name}")
+    if _is_cuda_single_model_mode() and model_name == "qwen-tts-0.6B":
+        return JSONResponse(
+            status_code=409,
+            content={
+                "detail": "Qwen TTS 0.6B is disabled in Colab/CUDA mode. Delete is not required.",
+                "error_code": "MODEL_SIZE_DISABLED_IN_COLAB",
+            },
+        )
     
     if not task_manager.start_model_operation("delete", model_name):
         return _model_operation_conflict_response(task_manager, "delete", model_name)
