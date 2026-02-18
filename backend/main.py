@@ -21,6 +21,7 @@ from pathlib import Path
 import uuid
 import signal
 import os
+from pydantic import ValidationError
 
 from . import database, models, profiles, history, tts, transcribe, config, export_import, channels, stories, studio_drafts, __version__
 from .database import get_db, Generation as DBGeneration, VoiceProfile as DBVoiceProfile
@@ -701,12 +702,15 @@ async def list_history(
     db: Session = Depends(get_db),
 ):
     """List generation history with optional filters."""
-    query = models.HistoryQuery(
-        profile_id=profile_id,
-        search=search,
-        limit=limit,
-        offset=offset,
-    )
+    try:
+        query = models.HistoryQuery(
+            profile_id=profile_id,
+            search=search,
+            limit=limit,
+            offset=offset,
+        )
+    except ValidationError as e:
+        raise HTTPException(status_code=422, detail=e.errors())
     return await history.list_generations(query, db)
 
 

@@ -79,7 +79,7 @@ class HistoryQuery(BaseModel):
     """Query model for generation history."""
     profile_id: Optional[str] = None
     search: Optional[str] = None
-    limit: int = Field(default=50, ge=1, le=100)
+    limit: int = Field(default=50, ge=1, le=1000)
     offset: int = Field(default=0, ge=0)
 
 
