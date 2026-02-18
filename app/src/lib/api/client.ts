@@ -37,6 +37,8 @@ import type {
 } from './types';
 
 class ApiClient {
+  private static readonly NGROK_BYPASS_HEADER = 'ngrok-skip-browser-warning';
+
   private getBaseUrl(): string {
     const serverUrl = useServerStore.getState().serverUrl;
     return serverUrl;
@@ -54,12 +56,38 @@ class ApiClient {
     };
   }
 
+  private getNgrokBypassHeaders(): Record<string, string> {
+    return {
+      [ApiClient.NGROK_BYPASS_HEADER]: '1',
+    };
+  }
+
+  private getRequestHeaders(extraHeaders?: Record<string, string>): Record<string, string> {
+    return {
+      ...this.getNgrokBypassHeaders(),
+      ...this.getAuthHeaders(),
+      ...extraHeaders,
+    };
+  }
+
+  private isNgrokWarningHtml(payload: string): boolean {
+    return payload.includes('ERR_NGROK_6024') || payload.includes('id="ngrok"');
+  }
+
+  private getNgrokWarningError(): Error {
+    return new Error(
+      'Ngrok returned a browser warning page (ERR_NGROK_6024). Verify the ngrok URL and keep the ngrok bypass header enabled.',
+    );
+  }
+
   private buildAuthedUrl(endpoint: string): string {
     const url = new URL(`${this.getBaseUrl()}${endpoint}`);
     const token = this.getApiKey();
     if (token) {
       url.searchParams.set('access_token', token);
     }
+    // Fallback for browser primitives (<img>, <audio>, EventSource) where custom headers may not be set.
+    url.searchParams.set(ApiClient.NGROK_BYPASS_HEADER, '1');
     return url.toString();
   }
 
@@ -67,7 +95,7 @@ class ApiClient {
     return fetch(url, {
       ...options,
       headers: {
-        ...this.getAuthHeaders(),
+        ...this.getRequestHeaders(),
         ...options?.headers,
       },
     });
@@ -78,20 +106,38 @@ class ApiClient {
     const response = await fetch(url, {
       ...options,
       headers: {
-        'Content-Type': 'application/json',
-        ...this.getAuthHeaders(),
+        ...this.getRequestHeaders({
+          'Content-Type': 'application/json',
+        }),
         ...options?.headers,
       },
     });
+    const payload = await response.text();
 
-    if (!response.ok) {
-      const error = await response.json().catch(() => ({
-        detail: response.statusText,
-      }));
-      throw new Error(error.detail || `HTTP error! status: ${response.status}`);
+    if (this.isNgrokWarningHtml(payload)) {
+      throw this.getNgrokWarningError();
     }
 
-    return response.json();
+    if (!response.ok) {
+      let detail = response.statusText || `HTTP error! status: ${response.status}`;
+      try {
+        const parsed = JSON.parse(payload) as { detail?: string };
+        if (parsed?.detail) detail = parsed.detail;
+      } catch {
+        if (payload.trim()) detail = payload;
+      }
+      throw new Error(detail);
+    }
+
+    if (!payload.trim()) {
+      return {} as T;
+    }
+
+    try {
+      return JSON.parse(payload) as T;
+    } catch {
+      throw new Error(`Expected JSON response from ${endpoint}, but received non-JSON content.`);
+    }
   }
 
   // Health
