@@ -37,6 +37,7 @@ class BackendSettings:
     groq_models: List[str]
     groq_timeout_seconds: int
     default_model_size: str
+    default_whisper_model_size: str
 
 
 def load_settings() -> BackendSettings:
@@ -54,6 +55,9 @@ def load_settings() -> BackendSettings:
 
     host_default = "0.0.0.0" if colab_profile else "127.0.0.1"
     default_model_size = "0.6B" if colab_profile else "1.7B"
+    default_whisper_model_size = os.getenv("VOICEBOX_DEFAULT_WHISPER_MODEL_SIZE", "base")
+    if default_whisper_model_size not in {"base", "small", "medium", "large"}:
+        default_whisper_model_size = "base"
 
     data_dir_env = os.getenv("VOICEBOX_DATA_DIR")
     data_dir = Path(data_dir_env).expanduser() if data_dir_env else None
@@ -84,4 +88,5 @@ def load_settings() -> BackendSettings:
         groq_models=groq_models,
         groq_timeout_seconds=int(os.getenv("VOICEBOX_GROQ_TIMEOUT_SECONDS", "20")),
         default_model_size=os.getenv("VOICEBOX_DEFAULT_MODEL_SIZE", default_model_size),
+        default_whisper_model_size=default_whisper_model_size,
     )

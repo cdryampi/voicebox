@@ -377,11 +377,18 @@ class ApiClient {
   }
 
   // Transcription
-  async transcribeAudio(file: File, language?: LanguageCode): Promise<TranscriptionResponse> {
+  async transcribeAudio(
+    file: File,
+    language?: LanguageCode,
+    modelSize?: 'base' | 'small' | 'medium' | 'large',
+  ): Promise<TranscriptionResponse> {
     const formData = new FormData();
     formData.append('file', file);
     if (language) {
       formData.append('language', language);
+    }
+    if (modelSize) {
+      formData.append('model_size', modelSize);
     }
 
     const url = `${this.getBaseUrl()}/transcribe`;

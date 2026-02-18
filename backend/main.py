@@ -195,6 +195,7 @@ async def runtime_info():
         "port": SETTINGS.port,
         "colab_profile": SETTINGS.colab_profile,
         "default_model_size": SETTINGS.default_model_size,
+        "default_whisper_model_size": SETTINGS.default_whisper_model_size,
         "torch_cuda_available": torch.cuda.is_available(),
         "torch_cuda_device": torch.cuda.get_device_name(0) if torch.cuda.is_available() else None,
         "torch_mps_available": hasattr(torch.backends, "mps") and torch.backends.mps.is_available(),
@@ -866,6 +867,7 @@ async def export_generation_audio(
 async def transcribe_audio(
     file: UploadFile = File(...),
     language: Optional[str] = Form(None),
+    model_size: Optional[str] = Form(None),
 ):
     """Transcribe audio file to text."""
     # Save uploaded file to temporary location
@@ -873,57 +875,55 @@ async def transcribe_audio(
         content = await file.read()
         tmp.write(content)
         tmp_path = tmp.name
-    
+
     try:
         # Get audio duration
         from .utils.audio import load_audio
         audio, sr = load_audio(tmp_path)
         duration = len(audio) / sr
-        
-        # Transcribe
-        whisper_model = transcribe.get_whisper_model()
 
-        # Check if Whisper model is downloaded (uses default size "base")
-        model_size = whisper_model.model_size
-        model_name = f"openai/whisper-{model_size}"
+        selected_model_size = (model_size or SETTINGS.default_whisper_model_size).strip().lower()
+        if selected_model_size not in {"base", "small", "medium", "large"}:
+            raise HTTPException(status_code=400, detail="Invalid whisper model_size")
+
+        whisper_model = transcribe.get_whisper_model()
+        model_name = f"openai/whisper-{selected_model_size}"
 
         # Check if model is cached
         from huggingface_hub import constants as hf_constants
         repo_cache = Path(hf_constants.HF_HUB_CACHE) / ("models--" + model_name.replace("/", "--"))
         if not repo_cache.exists():
-            # Start download in background
-            progress_model_name = f"whisper-{model_size}"
+            progress_model_name = f"whisper-{selected_model_size}"
 
             async def download_whisper_background():
                 try:
-                    await whisper_model.load_model_async(model_size)
+                    await whisper_model.load_model_async(selected_model_size)
                 except Exception as e:
                     get_task_manager().error_download(progress_model_name, str(e))
 
             get_task_manager().start_download(progress_model_name)
             asyncio.create_task(download_whisper_background())
 
-            # Return 202 Accepted
             raise HTTPException(
                 status_code=202,
                 detail={
-                    "message": f"Whisper model {model_size} is being downloaded. Please wait and try again.",
+                    "message": f"Whisper model {selected_model_size} is being downloaded. Please wait and try again.",
                     "model_name": progress_model_name,
-                    "downloading": True
-                }
+                    "downloading": True,
+                },
             )
 
+        await whisper_model.load_model_async(selected_model_size)
         text = await whisper_model.transcribe(tmp_path, language)
-        
         return models.TranscriptionResponse(
             text=text,
             duration=duration,
         )
-        
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
     finally:
-        # Clean up temp file
         Path(tmp_path).unlink(missing_ok=True)
 
 
@@ -959,6 +959,8 @@ async def render_story_from_history(
         return await stories.create_story_render_from_history(data, db)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

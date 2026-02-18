@@ -65,6 +65,7 @@ export interface HistoryListResponse {
 
 export interface TranscriptionRequest {
   language?: LanguageCode;
+  model_size?: 'base' | 'small' | 'medium' | 'large';
 }
 
 export interface TranscriptionResponse {

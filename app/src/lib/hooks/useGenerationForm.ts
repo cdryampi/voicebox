@@ -8,6 +8,7 @@ import { LANGUAGE_CODES, type LanguageCode } from '@/lib/constants/languages';
 import { useGeneration } from '@/lib/hooks/useGeneration';
 import { useModelDownloadToast } from '@/lib/hooks/useModelDownloadToast';
 import { useGenerationStore } from '@/stores/generationStore';
+import { useModelPreferencesStore } from '@/stores/modelPreferencesStore';
 import { usePlayerStore } from '@/stores/playerStore';
 
 const generationSchema = z.object({
@@ -30,6 +31,7 @@ export function useGenerationForm(options: UseGenerationFormOptions = {}) {
   const generation = useGeneration();
   const setAudioWithAutoPlay = usePlayerStore((state) => state.setAudioWithAutoPlay);
   const setIsGenerating = useGenerationStore((state) => state.setIsGenerating);
+  const defaultTtsModelSize = useModelPreferencesStore((state) => state.defaultTtsModelSize);
   const [downloadingModelName, setDownloadingModelName] = useState<string | null>(null);
   const [downloadingDisplayName, setDownloadingDisplayName] = useState<string | null>(null);
 
@@ -45,7 +47,7 @@ export function useGenerationForm(options: UseGenerationFormOptions = {}) {
       text: '',
       language: 'en',
       seed: undefined,
-      modelSize: '1.7B',
+      modelSize: defaultTtsModelSize,
       instruct: '',
       ...options.defaultValues,
     },

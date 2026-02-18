@@ -17,6 +17,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 import { useToast } from '@/components/ui/use-toast';
 import { apiClient } from '@/lib/api/client';
 import { useModelDownloadToast } from '@/lib/hooks/useModelDownloadToast';
+import { ModelDefaults } from './ModelDefaults';
 
 export function ModelManagement() {
   const { toast } = useToast();
@@ -143,7 +144,9 @@ export function ModelManagement() {
   };
 
   return (
-    <Card>
+    <div className="space-y-4">
+      <ModelDefaults />
+      <Card>
       <CardHeader>
         <CardTitle>Model Management</CardTitle>
         <CardDescription>
@@ -256,7 +259,8 @@ export function ModelManagement() {
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
-    </Card>
+      </Card>
+    </div>
   );
 }
 
