@@ -1548,7 +1548,11 @@ async def get_model_status():
     task_manager = get_task_manager()
     
     # Get set of currently downloading model names
-    active_download_names = {task.model_name for task in task_manager.get_active_downloads()}
+    active_download_names = {
+        task.model_name
+        for task in task_manager.get_active_downloads()
+        if task.status in {"downloading", "extracting"}
+    }
     
     # Try to import scan_cache_dir (might not be available in older versions)
     try:

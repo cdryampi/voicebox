@@ -59,9 +59,10 @@ class TaskManager:
     
     def error_download(self, model_name: str, error: str) -> None:
         """Mark a download as failed."""
+        # Failed downloads must not remain in the active list; otherwise
+        # polling endpoints report them as perpetually downloading.
         if model_name in self._active_downloads:
-            self._active_downloads[model_name].status = "error"
-            self._active_downloads[model_name].error = error
+            del self._active_downloads[model_name]
     
     def start_generation(self, task_id: str, profile_id: str, text: str) -> None:
         """Mark a generation as started."""
@@ -103,7 +104,11 @@ class TaskManager:
     
     def get_active_downloads(self) -> List[DownloadTask]:
         """Get all active downloads."""
-        return list(self._active_downloads.values())
+        return [
+            task
+            for task in self._active_downloads.values()
+            if task.status in {"downloading", "extracting"}
+        ]
     
     def get_active_generations(self) -> List[GenerationTask]:
         """Get all active generations."""

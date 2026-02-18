@@ -95,9 +95,9 @@ def _resolve_limits(limits: Optional[StudioLimits]) -> StudioLimits:
         return StudioLimits()
     # Re-validate and clamp against hard safe bounds.
     return StudioLimits(
-        max_lines=min(40, max(2, int(limits.max_lines))),
-        max_chars_per_line=min(1000, max(50, int(limits.max_chars_per_line))),
-        preview_seconds=min(10, max(1, int(limits.preview_seconds))),
+        max_lines=min(80, max(1, int(limits.max_lines))),
+        max_chars_per_line=min(1500, max(20, int(limits.max_chars_per_line))),
+        preview_seconds=min(15, max(1, int(limits.preview_seconds))),
     )
 
 
@@ -223,6 +223,7 @@ async def create_studio_draft(
     limits = _resolve_limits(data.limits)
 
     character_map: Dict[str, StoryCharacterMapping] = {}
+    normalized_palettes: Dict[str, List[EmotionType]] = {}
     for mapping in data.character_mappings:
         if not (mapping.description or "").strip():
             raise ValueError(f"Character description is required for {mapping.character_name}")
@@ -233,6 +234,12 @@ async def create_studio_draft(
             raise ValueError(
                 f"Profile {mapping.profile_id} for character {mapping.character_name} not found"
             )
+        palette = list(dict.fromkeys(mapping.emotion_palette or [mapping.default_emotion]))
+        if mapping.default_emotion not in palette:
+            palette.append(mapping.default_emotion)
+        normalized_palettes[mapping.character_name] = [
+            _normalize_emotion(emotion) for emotion in palette
+        ]
         character_map[mapping.character_name] = mapping
 
     story: Optional[DBStory] = None
@@ -256,6 +263,10 @@ async def create_studio_draft(
         m.character_name: (m.description or "").strip()
         for m in data.character_mappings
     }
+    character_emotion_palettes = {
+        m.character_name: normalized_palettes.get(m.character_name, [m.default_emotion])
+        for m in data.character_mappings
+    }
     try:
         composed_lines = compose_story_lines_with_groq(
             settings,
@@ -264,6 +275,7 @@ async def create_studio_draft(
             language=data.language,
             characters=character_names,
             character_descriptions=character_descriptions,
+            character_emotion_palettes=character_emotion_palettes,
             target_lines=limits.max_lines,
             model=llm_model,
         )
@@ -309,6 +321,11 @@ async def create_studio_draft(
         text, truncated = _truncate_line_text(raw_text, limits.max_chars_per_line)
 
         raw_emotion = _normalize_emotion(str(raw.get("emotion", "neutral")))
+        allowed_emotions = set(
+            normalized_palettes.get(mapping.character_name, [mapping.default_emotion])
+        )
+        if raw_emotion not in allowed_emotions:
+            raw_emotion = mapping.default_emotion
         raw_intensity = raw.get("emotion_intensity", mapping.default_emotion_intensity)
         try:
             intensity = _clamp01(float(raw_intensity))

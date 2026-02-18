@@ -93,7 +93,8 @@ def load_settings() -> BackendSettings:
     default_db_pool_timeout = 120 if colab_profile else 30
     default_db_pool_recycle = 1800
     default_db_connect_timeout = 60.0 if colab_profile else 30.0
-    default_db_use_null_pool = True if colab_profile else False
+    # SQLite under remote/polled workloads is more stable without pooled connections.
+    default_db_use_null_pool = True
     default_whisper_model_size = os.getenv("VOICEBOX_DEFAULT_WHISPER_MODEL_SIZE", "base")
     if default_whisper_model_size not in {"base", "small", "medium", "large"}:
         default_whisper_model_size = "base"

@@ -192,6 +192,7 @@ def compose_story_lines_with_groq(
     language: str,
     characters: list[str],
     character_descriptions: Optional[dict[str, str]] = None,
+    character_emotion_palettes: Optional[dict[str, list[str]]] = None,
     target_lines: int,
     model: Optional[str] = None,
 ) -> list[dict[str, Any]]:
@@ -200,11 +201,16 @@ def compose_story_lines_with_groq(
     """
     char_list = ", ".join(characters)
     descriptions = character_descriptions or {}
+    emotion_palettes = character_emotion_palettes or {}
     personality_lines = []
     for name in characters:
         desc = (descriptions.get(name) or "").strip()
+        palette = [emotion for emotion in (emotion_palettes.get(name) or []) if emotion]
+        palette_block = f" | allowed_emotions: {', '.join(palette)}" if palette else ""
         if desc:
-            personality_lines.append(f"- {name}: {desc}")
+            personality_lines.append(f"- {name}: {desc}{palette_block}")
+        elif palette_block:
+            personality_lines.append(f"- {name}:{palette_block}")
     personality_block = "\n".join(personality_lines) if personality_lines else "- (no personalities provided)"
     system = (
         "You create audio drama scripts. "
@@ -215,6 +221,7 @@ def compose_story_lines_with_groq(
         f"Language: {language}\n"
         f"Characters (must use only these names): {char_list}\n"
         f"Character personalities:\n{personality_block}\n"
+        "IMPORTANT: For each line, emotion must be chosen from the character's allowed_emotions.\n"
         f"Target lines: {target_lines}\n"
         f"Prompt: {prompt}\n\n"
         "Output JSON schema:\n"

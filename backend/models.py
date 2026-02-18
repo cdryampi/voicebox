@@ -356,6 +356,11 @@ class StoryCharacterMapping(BaseModel):
     character_name: str = Field(..., min_length=1, max_length=100)
     profile_id: str
     description: Optional[str] = Field(default=None, min_length=1, max_length=500)
+    emotion_palette: List[EmotionType] = Field(
+        default_factory=lambda: ["neutral", "happy", "sad", "angry", "fearful", "surprised", "calm"],
+        min_length=1,
+        max_length=7,
+    )
     default_emotion: EmotionType = "neutral"
     default_emotion_intensity: float = Field(default=0.5, ge=0.0, le=1.0)
     default_track: int = 0
@@ -441,7 +446,7 @@ class StoryComposeWithGroqRequest(BaseModel):
     prompt: str = Field(..., min_length=5, max_length=4000)
     mode: Literal["novela", "roleplay"] = "roleplay"
     language: str = Field(default="en", pattern="^(zh|en|ja|ko|de|fr|ru|pt|es|it)$")
-    target_lines: int = Field(default=8, ge=2, le=40)
+    target_lines: int = Field(default=8, ge=1, le=80)
     llm_model: Optional[str] = Field(default=None, max_length=120)
     model_size: Optional[str] = Field(default=None, pattern="^(1\\.7B|0\\.6B)$")
     gap_ms: int = Field(default=200, ge=0, le=5000)
@@ -451,9 +456,9 @@ class StoryComposeWithGroqRequest(BaseModel):
 
 class StudioLimits(BaseModel):
     """Hard limits used by Studio draft generation and previews."""
-    max_lines: int = Field(default=20, ge=2, le=40)
-    max_chars_per_line: int = Field(default=300, ge=50, le=1000)
-    preview_seconds: int = Field(default=5, ge=1, le=10)
+    max_lines: int = Field(default=20, ge=1, le=80)
+    max_chars_per_line: int = Field(default=300, ge=20, le=1500)
+    preview_seconds: int = Field(default=5, ge=1, le=15)
 
 
 class StudioDraftCreateRequest(BaseModel):

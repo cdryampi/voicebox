@@ -6,6 +6,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Checkbox } from '@/components/ui/checkbox';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
+import { MultiSelect } from '@/components/ui/multi-select';
 import {
   Select,
   SelectContent,
@@ -43,6 +44,10 @@ const EMOTION_OPTIONS: EmotionType[] = [
   'surprised',
   'calm',
 ];
+const EMOTION_MULTISELECT_OPTIONS = EMOTION_OPTIONS.map((emotion) => ({
+  value: emotion,
+  label: emotion,
+}));
 
 function clamp01(value: number): number {
   if (Number.isNaN(value)) return 0.5;
@@ -117,6 +122,7 @@ export function StudioTab() {
       character_name: 'Narrador',
       profile_id: '',
       description: '',
+      emotion_palette: ['neutral', 'happy', 'sad', 'angry', 'fearful', 'surprised', 'calm'],
       default_emotion: 'neutral',
       default_emotion_intensity: 0.5,
       default_track: 0,
@@ -173,7 +179,15 @@ export function StudioTab() {
     const sortedLines = [...draftDetail.lines].sort((a, b) => a.order_index - b.order_index);
     setLines(sortedLines);
     setSavedLinesHash(serializeDraftLines(sortedLines));
-    setMappings(draftDetail.character_mappings.slice(0, 10));
+    setMappings(
+      draftDetail.character_mappings.slice(0, 10).map((mapping) => ({
+        ...mapping,
+        emotion_palette:
+          mapping.emotion_palette && mapping.emotion_palette.length > 0
+            ? mapping.emotion_palette
+            : ['neutral', 'happy', 'sad', 'angry', 'fearful', 'surprised', 'calm'],
+      })),
+    );
     setName(draftDetail.name);
     setDescription(draftDetail.description ?? '');
     setPrompt(draftDetail.prompt);
@@ -250,7 +264,11 @@ export function StudioTab() {
     if (!prompt.trim() || !selectedModel) return false;
     if (mappings.length < 1 || mappings.length > 10) return false;
     return mappings.every(
-      (m) => m.character_name.trim() && m.profile_id && (m.description ?? '').trim(),
+      (m) =>
+        m.character_name.trim() &&
+        m.profile_id &&
+        (m.description ?? '').trim() &&
+        (m.emotion_palette?.length ?? 0) > 0,
     );
   }, [groqModels?.enabled, prompt, selectedModel, mappings]);
 
@@ -267,6 +285,7 @@ export function StudioTab() {
         profile_id: profiles?.[0]?.id ?? '',
         description: '',
         default_emotion: 'neutral',
+        emotion_palette: ['neutral', 'happy', 'sad', 'angry', 'fearful', 'surprised', 'calm'],
         default_emotion_intensity: 0.5,
         default_track: prev.length,
       },
@@ -287,6 +306,7 @@ export function StudioTab() {
         character_name: `Character ${prev.length + i + 1}`,
         profile_id: profiles?.[0]?.id ?? '',
         description: '',
+        emotion_palette: ['neutral', 'happy', 'sad', 'angry', 'fearful', 'surprised', 'calm'],
         default_emotion: 'neutral' as EmotionType,
         default_emotion_intensity: 0.5,
         default_track: prev.length + i,
@@ -326,9 +346,9 @@ export function StudioTab() {
         model_size: selectedModelSize,
         character_mappings: mappings,
         limits: {
-          max_lines: clampLimits(maxLines, 2, 40, 20),
-          max_chars_per_line: clampLimits(maxCharsPerLine, 50, 1000, 300),
-          preview_seconds: clampLimits(previewSeconds, 1, 10, 5),
+          max_lines: clampLimits(maxLines, 1, 80, 20),
+          max_chars_per_line: clampLimits(maxCharsPerLine, 20, 1500, 300),
+          preview_seconds: clampLimits(previewSeconds, 1, 15, 5),
         },
       });
       setDraftId(created.draft_id);
@@ -565,7 +585,7 @@ export function StudioTab() {
   };
 
   const characterOptions = mappings.map((m) => m.character_name);
-  const charLimit = clampLimits(maxCharsPerLine, 50, 1000, 300);
+  const charLimit = clampLimits(maxCharsPerLine, 20, 1500, 300);
 
   return (
     <div className="flex h-full min-h-0 gap-6 overflow-hidden">
@@ -667,6 +687,27 @@ export function StudioTab() {
                   placeholder="Personality description (required)"
                   className="min-h-[70px]"
                 />
+                <div className="space-y-1">
+                  <Label className="text-xs">Emotion palette (Qwen3-TTS)</Label>
+                  <MultiSelect
+                    options={EMOTION_MULTISELECT_OPTIONS}
+                    value={mapping.emotion_palette ?? []}
+                    onChange={(value) => {
+                      const nextPalette = (value.length ? value : ['neutral']) as EmotionType[];
+                      const nextDefault = nextPalette.includes(
+                        (mapping.default_emotion ?? 'neutral') as EmotionType,
+                      )
+                        ? (mapping.default_emotion as EmotionType)
+                        : nextPalette[0];
+                      updateMapping(index, {
+                        emotion_palette: nextPalette,
+                        default_emotion: nextDefault,
+                      });
+                    }}
+                    placeholder="Select emotions"
+                    className="rounded-md h-9 text-xs"
+                  />
+                </div>
                 <Select
                   value={mapping.profile_id}
                   onValueChange={(value) => updateMapping(index, { profile_id: value })}
@@ -693,7 +734,10 @@ export function StudioTab() {
                       <SelectValue />
                     </SelectTrigger>
                     <SelectContent>
-                      {EMOTION_OPTIONS.map((emotion) => (
+                      {(mapping.emotion_palette?.length
+                        ? mapping.emotion_palette
+                        : EMOTION_OPTIONS
+                      ).map((emotion) => (
                         <SelectItem key={emotion} value={emotion}>
                           {emotion}
                         </SelectItem>
@@ -824,9 +868,9 @@ export function StudioTab() {
                 <Input
                   type="number"
                   value={maxLines}
-                  min={2}
-                  max={40}
-                  onChange={(e) => setMaxLines(clampLimits(Number(e.target.value), 2, 40, 20))}
+                  min={1}
+                  max={80}
+                  onChange={(e) => setMaxLines(clampLimits(Number(e.target.value), 1, 80, 20))}
                 />
               </div>
               <div className="space-y-1">
@@ -834,10 +878,10 @@ export function StudioTab() {
                 <Input
                   type="number"
                   value={maxCharsPerLine}
-                  min={50}
-                  max={1000}
+                  min={20}
+                  max={1500}
                   onChange={(e) =>
-                    setMaxCharsPerLine(clampLimits(Number(e.target.value), 50, 1000, 300))
+                    setMaxCharsPerLine(clampLimits(Number(e.target.value), 20, 1500, 300))
                   }
                 />
               </div>
@@ -847,8 +891,8 @@ export function StudioTab() {
                   type="number"
                   value={previewSeconds}
                   min={1}
-                  max={10}
-                  onChange={(e) => setPreviewSeconds(clampLimits(Number(e.target.value), 1, 10, 5))}
+                  max={15}
+                  onChange={(e) => setPreviewSeconds(clampLimits(Number(e.target.value), 1, 15, 5))}
                 />
               </div>
             </div>

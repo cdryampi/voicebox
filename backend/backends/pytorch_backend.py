@@ -4,6 +4,7 @@ PyTorch backend implementation for TTS and STT.
 
 from typing import Optional, List, Tuple
 import asyncio
+import threading
 import torch
 import numpy as np
 from pathlib import Path
@@ -25,6 +26,10 @@ class PyTorchTTSBackend:
         self.device = self._get_device()
         self.torch_dtype = self._get_torch_dtype()
         self._current_model_size = None
+        # Protect model load/unload/inference from concurrent access in multi-request servers.
+        self._load_lock = asyncio.Lock()
+        self._inference_semaphore = asyncio.Semaphore(1)
+        self._model_lock = threading.RLock()
     
     def _get_device(self) -> str:
         """Get the best available device."""
@@ -105,6 +110,66 @@ class PyTorchTTSBackend:
         except Exception as e:
             print(f"[_is_model_cached] Error checking cache for {model_size}: {e}")
             return False
+
+    def _load_qwen_model_with_fallback(self, qwen_model_cls, model_path: str, is_cached: bool):
+        """
+        Load Qwen model with robust fallbacks for meta-tensor edge cases.
+
+        Some torch/transformers/qwen_tts combinations can fail with:
+        "Cannot copy out of meta tensor ...". We retry with safer loading options.
+        """
+        attempts = [
+            {
+                "device_map": self.device,
+                "torch_dtype": self.torch_dtype,
+                "local_files_only": is_cached,
+            },
+            {
+                "device_map": "auto",
+                "torch_dtype": self.torch_dtype,
+                "local_files_only": is_cached,
+            },
+            {
+                "device_map": None,
+                "torch_dtype": self.torch_dtype,
+                "local_files_only": is_cached,
+                "low_cpu_mem_usage": False,
+            },
+        ]
+
+        last_error: Optional[Exception] = None
+        for idx, kwargs in enumerate(attempts, start=1):
+            try:
+                print(f"[TTS] Loading attempt {idx} with args: {kwargs}")
+                with self._model_lock:
+                    return qwen_model_cls.from_pretrained(model_path, **kwargs)
+            except TypeError as e:
+                # Older wrappers may not expose all transformers kwargs.
+                if "low_cpu_mem_usage" in str(e) and "unexpected keyword argument" in str(e):
+                    kwargs = {k: v for k, v in kwargs.items() if k != "low_cpu_mem_usage"}
+                    try:
+                        with self._model_lock:
+                            return qwen_model_cls.from_pretrained(model_path, **kwargs)
+                    except Exception as retry_error:  # noqa: BLE001
+                        last_error = retry_error
+                        continue
+                last_error = e
+                continue
+            except RuntimeError as e:
+                last_error = e
+                message = str(e)
+                if "meta tensor" not in message.lower():
+                    raise
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                continue
+            except Exception as e:  # noqa: BLE001
+                last_error = e
+                continue
+
+        raise RuntimeError(
+            f"Failed to load TTS model after fallback attempts: {last_error}"
+        ) from last_error
     
     async def load_model_async(self, model_size: Optional[str] = None):
         """
@@ -113,19 +178,20 @@ class PyTorchTTSBackend:
         Args:
             model_size: Model size to load (1.7B or 0.6B)
         """
-        if model_size is None:
-            model_size = self.model_size
-            
-        # If already loaded with correct size, return
-        if self.model is not None and self._current_model_size == model_size:
-            return
-        
-        # Unload existing model if different size requested
-        if self.model is not None and self._current_model_size != model_size:
-            self.unload_model()
-        
-        # Run blocking load in thread pool
-        await asyncio.to_thread(self._load_model_sync, model_size)
+        async with self._load_lock:
+            if model_size is None:
+                model_size = self.model_size
+
+            # If already loaded with correct size, return
+            if self.model is not None and self._current_model_size == model_size:
+                return
+
+            # Unload existing model if different size requested
+            if self.model is not None and self._current_model_size != model_size:
+                self.unload_model()
+
+            # Run blocking load in thread pool
+            await asyncio.to_thread(self._load_model_sync, model_size)
     
     # Alias for compatibility
     load_model = load_model_async
@@ -174,11 +240,12 @@ class PyTorchTTSBackend:
 
             # Load the model (tqdm is patched, but filters out non-download progress)
             try:
-                self.model = Qwen3TTSModel.from_pretrained(
-                    model_path,
-                    device_map=self.device,
-                    torch_dtype=self.torch_dtype,
-                )
+                with self._model_lock:
+                    self.model = self._load_qwen_model_with_fallback(
+                        Qwen3TTSModel,
+                        model_path=model_path,
+                        is_cached=is_cached,
+                    )
             finally:
                 # Exit the patch context
                 tracker_context.__exit__(None, None, None)
@@ -204,6 +271,11 @@ class PyTorchTTSBackend:
         except Exception as e:
             print(f"Error loading TTS model: {e}")
             print(f"Tip: The model will be automatically downloaded from HuggingFace Hub on first use.")
+            with self._model_lock:
+                self.model = None
+                self._current_model_size = None
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
             progress_manager = get_progress_manager()
             task_manager = get_task_manager()
             model_name = f"qwen-tts-{model_size}"
@@ -213,15 +285,16 @@ class PyTorchTTSBackend:
     
     def unload_model(self):
         """Unload the model to free memory."""
-        if self.model is not None:
-            del self.model
-            self.model = None
-            self._current_model_size = None
-            
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-            
-            print("TTS model unloaded")
+        with self._model_lock:
+            if self.model is not None:
+                del self.model
+                self.model = None
+                self._current_model_size = None
+
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+
+                print("TTS model unloaded")
     
     async def create_voice_prompt(
         self,
@@ -260,14 +333,16 @@ class PyTorchTTSBackend:
         
         def _create_prompt_sync():
             """Run synchronous voice prompt creation in thread pool."""
-            return self.model.create_voice_clone_prompt(
-                ref_audio=str(audio_path),
-                ref_text=reference_text,
-                x_vector_only_mode=False,
-            )
+            with self._model_lock:
+                return self.model.create_voice_clone_prompt(
+                    ref_audio=str(audio_path),
+                    ref_text=reference_text,
+                    x_vector_only_mode=False,
+                )
         
-        # Run blocking operation in thread pool
-        voice_prompt_items = await asyncio.to_thread(_create_prompt_sync)
+        # Run blocking operation in thread pool (serialized for CUDA stability).
+        async with self._inference_semaphore:
+            voice_prompt_items = await asyncio.to_thread(_create_prompt_sync)
         
         # Cache if enabled
         if use_cache:
@@ -340,15 +415,28 @@ class PyTorchTTSBackend:
                     torch.cuda.manual_seed(seed)
 
             # Generate audio - this is the blocking operation
-            wavs, sample_rate = self.model.generate_voice_clone(
-                text=text,
-                voice_clone_prompt=voice_prompt,
-                instruct=instruct,
-            )
+            with self._model_lock:
+                wavs, sample_rate = self.model.generate_voice_clone(
+                    text=text,
+                    voice_clone_prompt=voice_prompt,
+                    instruct=instruct,
+                )
             return wavs[0], sample_rate
 
-        # Run blocking inference in thread pool to avoid blocking event loop
-        audio, sample_rate = await asyncio.to_thread(_generate_sync)
+        # Run blocking inference in thread pool to avoid blocking event loop.
+        # Serialize CUDA calls to avoid OOM/race crashes under concurrent requests.
+        async with self._inference_semaphore:
+            try:
+                audio, sample_rate = await asyncio.to_thread(_generate_sync)
+            except RuntimeError as e:
+                message = str(e).lower()
+                if "out of memory" in message and torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                    raise RuntimeError(
+                        "CUDA out of memory while generating audio. "
+                        "Try model 0.6B, fewer cards, or shorter lines."
+                    ) from e
+                raise
 
         return audio, sample_rate
 

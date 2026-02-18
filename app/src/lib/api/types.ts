@@ -252,6 +252,7 @@ export interface StoryCharacterMapping {
   character_name: string;
   profile_id: string;
   description?: string;
+  emotion_palette?: EmotionType[];
   default_emotion?: EmotionType;
   default_emotion_intensity?: number;
   default_track?: number;
