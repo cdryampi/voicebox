@@ -3,19 +3,10 @@ import type {
   ActiveDownloadTask,
   ActiveGenerationTask,
   ActiveStoryRenderTask,
+  TaskTerminalEvent,
 } from '@/lib/api/types';
 
 export type ConnectionState = 'connected' | 'degraded' | 'disconnected';
-export type GlobalTaskKind = 'generation' | 'story_render' | 'download';
-export type GlobalTaskState = 'running' | 'completed' | 'failed';
-
-export interface GlobalTaskTerminalEvent {
-  id: string;
-  kind: GlobalTaskKind;
-  state: Exclude<GlobalTaskState, 'running'>;
-  message: string;
-  createdAt: number;
-}
 
 interface GlobalTaskActivityStore {
   connectionState: ConnectionState;
@@ -29,8 +20,15 @@ interface GlobalTaskActivityStore {
     generations: number;
     storyRenders: number;
   };
-  lastTerminalEvent: GlobalTaskTerminalEvent | null;
-  terminalEvents: GlobalTaskTerminalEvent[];
+  modelOperation: {
+    busy: boolean;
+    kind?: 'download' | 'activate' | 'delete';
+    modelName?: string;
+    startedAt?: string;
+  };
+  lastTerminalEvent: TaskTerminalEvent | null;
+  terminalEvents: TaskTerminalEvent[];
+  lastTerminalEventId: number;
   setSnapshot: (payload: {
     hasActiveTasks: boolean;
     activeDownloads: ActiveDownloadTask[];
@@ -41,10 +39,16 @@ interface GlobalTaskActivityStore {
       generations: number;
       storyRenders: number;
     };
+    modelOperation?: {
+      busy: boolean;
+      kind?: 'download' | 'activate' | 'delete';
+      modelName?: string;
+      startedAt?: string;
+    };
   }) => void;
   setConnectionState: (connectionState: ConnectionState) => void;
   setHealthErrorStreak: (healthErrorStreak: number) => void;
-  appendTerminalEvents: (events: GlobalTaskTerminalEvent[]) => void;
+  appendTerminalEvents: (events: TaskTerminalEvent[]) => void;
 }
 
 export const useGlobalTaskActivityStore = create<GlobalTaskActivityStore>((set) => ({
@@ -59,14 +63,19 @@ export const useGlobalTaskActivityStore = create<GlobalTaskActivityStore>((set) 
     generations: 0,
     storyRenders: 0,
   },
+  modelOperation: {
+    busy: false,
+  },
   lastTerminalEvent: null,
   terminalEvents: [],
+  lastTerminalEventId: 0,
   setSnapshot: ({
     hasActiveTasks,
     activeDownloads,
     activeGenerations,
     activeStoryRenders,
     activeCounts,
+    modelOperation,
   }) =>
     set({
       hasActiveTasks,
@@ -74,6 +83,7 @@ export const useGlobalTaskActivityStore = create<GlobalTaskActivityStore>((set) 
       activeGenerations,
       activeStoryRenders,
       activeCounts,
+      modelOperation: modelOperation ?? { busy: false },
     }),
   setConnectionState: (connectionState) => set({ connectionState }),
   setHealthErrorStreak: (healthErrorStreak) => set({ healthErrorStreak }),
@@ -82,11 +92,15 @@ export const useGlobalTaskActivityStore = create<GlobalTaskActivityStore>((set) 
       if (!events.length) {
         return state;
       }
-      const merged = [...state.terminalEvents, ...events].slice(-30);
+      const byId = new Map<number, TaskTerminalEvent>();
+      for (const event of state.terminalEvents) byId.set(event.id, event);
+      for (const event of events) byId.set(event.id, event);
+      const merged = [...byId.values()].sort((a, b) => a.id - b.id).slice(-30);
+      const last = merged[merged.length - 1] ?? null;
       return {
         terminalEvents: merged,
-        lastTerminalEvent: merged[merged.length - 1] ?? null,
+        lastTerminalEvent: last,
+        lastTerminalEventId: last?.id ?? state.lastTerminalEventId,
       };
     }),
 }));
-

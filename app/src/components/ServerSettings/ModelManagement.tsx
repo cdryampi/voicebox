@@ -28,12 +28,7 @@ export function ModelManagement() {
 
   const { data: modelStatus, isLoading } = useQuery({
     queryKey: ['modelStatus'],
-    queryFn: async () => {
-      console.log('[Query] Fetching model status');
-      const result = await apiClient.getModelStatus();
-      console.log('[Query] Model status fetched:', result);
-      return result;
-    },
+    queryFn: async () => apiClient.getModelStatus(),
     refetchInterval: (query) => {
       const data = query.state.data;
       const hasActiveDownloads = !!data?.models?.some((m) => m.downloading);
@@ -72,16 +67,21 @@ export function ModelManagement() {
     staleTime: 5000,
   });
 
+  const { data: tasksSummary } = useQuery({
+    queryKey: ['tasksSummaryForModels'],
+    queryFn: () => apiClient.getTasksSummary(),
+    refetchInterval: 1500,
+    staleTime: 500,
+  });
+
   // Callbacks for download completion
   const handleDownloadComplete = useCallback(() => {
-    console.log('[ModelManagement] Download complete, clearing state');
     setDownloadingModel(null);
     setDownloadingDisplayName(null);
     queryClient.invalidateQueries({ queryKey: ['modelStatus'] });
   }, [queryClient]);
 
   const handleDownloadError = useCallback(() => {
-    console.log('[ModelManagement] Download error, clearing state');
     setDownloadingModel(null);
     setDownloadingDisplayName(null);
   }, []);
@@ -103,8 +103,13 @@ export function ModelManagement() {
   } | null>(null);
 
   const handleDownload = async (modelName: string) => {
-    console.log('[Download] Button clicked for:', modelName, 'at', new Date().toISOString());
-    
+    if (isModelOperationBusy) {
+      toast({
+        title: 'Model operation in progress',
+        description: `Wait for current operation to finish: ${modelOperationLabel ?? 'processing'}.`,
+      });
+      return;
+    }
     // Find display name
     const model = modelStatus?.models.find((m) => m.model_name === modelName);
     const displayName = model?.display_name || modelName;
@@ -113,9 +118,8 @@ export function ModelManagement() {
       // IMPORTANT: Call the API FIRST before setting state
       // Setting state enables the SSE EventSource in useModelDownloadToast,
       // which can block/delay the download fetch due to HTTP/1.1 connection limits
-      console.log('[Download] Calling download API for:', modelName);
       const result = await apiClient.triggerModelDownload(modelName);
-      console.log('[Download] Download API responded:', result);
+      void result;
       
       // NOW set state to enable SSE tracking (after download has started on backend)
       setDownloadingModel(modelName);
@@ -125,7 +129,6 @@ export function ModelManagement() {
       // or by the polling interval detecting the model is downloaded
       queryClient.invalidateQueries({ queryKey: ['modelStatus'] });
     } catch (error) {
-      console.error('[Download] Download failed:', error);
       setDownloadingModel(null);
       setDownloadingDisplayName(null);
       toast({
@@ -137,6 +140,13 @@ export function ModelManagement() {
   };
 
   const handleActivate = async (modelName: string) => {
+    if (isModelOperationBusy) {
+      toast({
+        title: 'Model operation in progress',
+        description: `Wait for current operation to finish: ${modelOperationLabel ?? 'processing'}.`,
+      });
+      return;
+    }
     try {
       setActivatingModel(modelName);
       const result = await apiClient.activateModel(modelName);
@@ -155,9 +165,16 @@ export function ModelManagement() {
     } catch (error) {
       const err = error as Error & { errorCode?: string };
       const isCudaAssert = err.errorCode === 'MODEL_ACTIVATE_CUDA_ASSERT';
+      const requiresRestart = err.errorCode === 'MODEL_SWITCH_REQUIRES_RESTART';
       toast({
-        title: isCudaAssert ? 'Activation failed: CUDA runtime invalid' : 'Activation failed',
-        description: isCudaAssert
+        title: requiresRestart
+          ? 'Activation requires restart'
+          : isCudaAssert
+            ? 'Activation failed: CUDA runtime invalid'
+            : 'Activation failed',
+        description: requiresRestart
+          ? err.message
+          : isCudaAssert
           ? `${err.message} Restart backend process in Colab and retry.`
           : error instanceof Error
             ? error.message
@@ -170,14 +187,8 @@ export function ModelManagement() {
   };
 
   const deleteMutation = useMutation({
-    mutationFn: async (modelName: string) => {
-      console.log('[Delete] Deleting model:', modelName);
-      const result = await apiClient.deleteModel(modelName);
-      console.log('[Delete] Model deleted successfully:', modelName);
-      return result;
-    },
+    mutationFn: async (modelName: string) => apiClient.deleteModel(modelName),
     onSuccess: async (_data, _modelName) => {
-      console.log('[Delete] onSuccess - showing toast and invalidating queries');
       toast({
         title: 'Model deleted',
         description: `${modelToDelete?.displayName || 'Model'} has been deleted successfully.`,
@@ -186,18 +197,14 @@ export function ModelManagement() {
       setModelToDelete(null);
       // Invalidate AND explicitly refetch to ensure UI updates
       // Using refetchType: 'all' ensures we refetch even if the query is stale
-      console.log('[Delete] Invalidating modelStatus query');
       await queryClient.invalidateQueries({ 
         queryKey: ['modelStatus'],
         refetchType: 'all',
       });
       // Also explicitly refetch to guarantee fresh data
-      console.log('[Delete] Explicitly refetching modelStatus query');
       await queryClient.refetchQueries({ queryKey: ['modelStatus'] });
-      console.log('[Delete] Query refetched');
     },
     onError: (error: Error) => {
-      console.log('[Delete] onError:', error);
       toast({
         title: 'Delete failed',
         description: error.message,
@@ -211,6 +218,11 @@ export function ModelManagement() {
     if (sizeMb < 1024) return `${sizeMb.toFixed(1)} MB`;
     return `${(sizeMb / 1024).toFixed(2)} GB`;
   };
+
+  const isModelOperationBusy = !!tasksSummary?.model_ops_busy;
+  const modelOperationLabel = isModelOperationBusy
+    ? `${tasksSummary?.model_op_kind ?? 'operation'} ${tasksSummary?.model_op_model_name ?? ''}`.trim()
+    : null;
 
   return (
     <div className="space-y-4">
@@ -227,6 +239,11 @@ export function ModelManagement() {
           <div className="rounded-lg border border-amber-300/50 bg-amber-50/30 p-3 text-sm text-amber-800 dark:text-amber-200">
             Colab CUDA mode: load models one by one. Activating Whisper unloads Qwen TTS and vice
             versa to avoid VRAM crashes.
+          </div>
+        )}
+        {isModelOperationBusy && (
+          <div className="rounded-lg border border-blue-300/50 bg-blue-50/30 p-3 text-sm text-blue-800 dark:text-blue-200">
+            Server is processing model operation: {modelOperationLabel}
           </div>
         )}
 
@@ -276,6 +293,7 @@ export function ModelManagement() {
                       onActivate={() => handleActivate(model.model_name)}
                       isDownloading={downloadingModel === model.model_name}
                       isActivating={activatingModel === model.model_name}
+                      disableActions={isModelOperationBusy}
                       formatSize={formatSize}
                     />
                   ))}
@@ -306,6 +324,7 @@ export function ModelManagement() {
                       onActivate={() => handleActivate(model.model_name)}
                       isDownloading={downloadingModel === model.model_name}
                       isActivating={activatingModel === model.model_name}
+                      disableActions={isModelOperationBusy}
                       formatSize={formatSize}
                     />
                   ))}
@@ -340,7 +359,7 @@ export function ModelManagement() {
                   deleteMutation.mutate(modelToDelete.name);
                 }
               }}
-              disabled={deleteMutation.isPending}
+              disabled={deleteMutation.isPending || isModelOperationBusy}
               className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
             >
               {deleteMutation.isPending ? (
@@ -374,6 +393,7 @@ interface ModelItemProps {
   onActivate: () => void;
   isDownloading: boolean;  // Local state - true if user just clicked download
   isActivating: boolean;
+  disableActions?: boolean;
   formatSize: (sizeMb?: number) => string;
 }
 
@@ -384,6 +404,7 @@ function ModelItem({
   onActivate,
   isDownloading,
   isActivating,
+  disableActions = false,
   formatSize,
 }: ModelItemProps) {
   // Use server's downloading state OR local state (for immediate feedback before server updates)
@@ -416,7 +437,12 @@ function ModelItem({
         {model.downloaded && !showDownloading ? (
           <div className="flex items-center gap-2">
             {!model.loaded && (
-              <Button size="sm" onClick={onActivate} variant="outline" disabled={isActivating}>
+              <Button
+                size="sm"
+                onClick={onActivate}
+                variant="outline"
+                disabled={isActivating || disableActions}
+              >
                 {isActivating ? (
                   <>
                     <Loader2 className="h-4 w-4 mr-2 animate-spin" />
@@ -431,7 +457,7 @@ function ModelItem({
               size="sm"
               onClick={onDelete}
               variant="outline"
-              disabled={model.loaded}
+              disabled={model.loaded || disableActions}
               title={model.loaded ? 'Unload model before deleting' : 'Delete model'}
             >
               <Trash2 className="h-4 w-4" />
@@ -443,7 +469,7 @@ function ModelItem({
             Downloading...
           </Button>
         ) : (
-          <Button size="sm" onClick={onDownload} variant="outline">
+          <Button size="sm" onClick={onDownload} variant="outline" disabled={disableActions}>
             <Download className="h-4 w-4 mr-2" />
             Download
           </Button>

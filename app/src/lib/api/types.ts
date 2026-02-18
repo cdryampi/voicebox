@@ -211,6 +211,26 @@ export interface ActiveTasksSummaryResponse {
   story_renders_active: number;
   has_active_tasks: boolean;
   downloading_models: string[];
+  model_ops_busy: boolean;
+  model_op_kind?: 'download' | 'activate' | 'delete';
+  model_op_model_name?: string;
+  model_op_started_at?: string;
+  last_terminal_event?: TaskTerminalEvent;
+}
+
+export interface TaskTerminalEvent {
+  id: number;
+  kind: 'generation' | 'download' | 'story_render' | 'model_op';
+  state: 'completed' | 'failed';
+  entity_id: string;
+  message: string;
+  error_code?: string;
+  created_at: string;
+}
+
+export interface TaskEventsResponse {
+  events: TaskTerminalEvent[];
+  last_id: number;
 }
 
 export interface CapabilitiesResponse {
@@ -377,7 +397,11 @@ export interface StoryRenderStatusResponse {
   status: 'queued' | 'running' | 'completed' | 'failed' | 'partial_failed';
   total_lines: number;
   processed_lines: number;
+  completed_lines: number;
+  failed_lines: number;
   error_summary?: string;
+  failure_phase?: 'preflight' | 'line_generation' | 'mix_export';
+  failure_code?: string;
   output_audio_path?: string;
   created_at: string;
   updated_at: string;

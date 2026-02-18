@@ -4,19 +4,15 @@ import type {
   ActiveDownloadTask,
   ActiveGenerationTask,
   ActiveStoryRenderTask,
+  TaskTerminalEvent,
 } from '@/lib/api/types';
 import { useGenerationStore } from '@/stores/generationStore';
-import type { GlobalTaskTerminalEvent } from '@/stores/globalTaskActivityStore';
 import { useGlobalTaskActivityStore } from '@/stores/globalTaskActivityStore';
 
 const ACTIVE_POLL_INTERVAL = 2000;
 const IDLE_POLL_INTERVAL = 8000;
 const HIDDEN_POLL_INTERVAL = 30000;
 const HEALTH_POLL_INTERVAL = 30000;
-
-function buildTaskKey(kind: 'download' | 'generation' | 'story_render', id: string): string {
-  return `${kind}:${id}`;
-}
 
 export function useGlobalTaskActivity() {
   const setSnapshot = useGlobalTaskActivityStore((state) => state.setSnapshot);
@@ -25,10 +21,7 @@ export function useGlobalTaskActivity() {
   const setHealthErrorStreak = useGlobalTaskActivityStore((state) => state.setHealthErrorStreak);
   const setIsGenerating = useGenerationStore((state) => state.setIsGenerating);
   const setActiveGenerationId = useGenerationStore((state) => state.setActiveGenerationId);
-
-  const previousActiveTasksRef = useRef<Map<string, { message: string; kind: 'download' | 'generation' | 'story_render' }>>(
-    new Map(),
-  );
+  const lastEventIdRef = useRef<number>(useGlobalTaskActivityStore.getState().lastTerminalEventId || 0);
   const consecutiveFailuresRef = useRef(0);
   const healthErrorStreakRef = useRef(0);
 
@@ -39,6 +32,11 @@ export function useGlobalTaskActivity() {
       let activeStoryRenders: ActiveStoryRenderTask[] = [];
       let hasActiveTasks = false;
       let counts = { downloads: 0, generations: 0, storyRenders: 0 };
+      let summaryModelBusy = false;
+      let summaryModelKind: 'download' | 'activate' | 'delete' | undefined;
+      let summaryModelName: string | undefined;
+      let summaryModelStartedAt: string | undefined;
+      let summaryLastTerminalEvent: TaskTerminalEvent | undefined;
 
       try {
         const summary = await apiClient.getTasksSummary();
@@ -48,6 +46,11 @@ export function useGlobalTaskActivity() {
           generations: summary.generations_active,
           storyRenders: summary.story_renders_active,
         };
+        summaryModelBusy = summary.model_ops_busy;
+        summaryModelKind = summary.model_op_kind;
+        summaryModelName = summary.model_op_model_name;
+        summaryModelStartedAt = summary.model_op_started_at;
+        summaryLastTerminalEvent = summary.last_terminal_event;
       } catch (error) {
         const status = (error as { status?: number })?.status;
         if (status !== 404) {
@@ -69,6 +72,11 @@ export function useGlobalTaskActivity() {
         };
       }
 
+      if (summaryLastTerminalEvent) {
+        appendTerminalEvents([summaryLastTerminalEvent]);
+        lastEventIdRef.current = Math.max(lastEventIdRef.current, summaryLastTerminalEvent.id);
+      }
+
       if (hasActiveTasks && (!activeDownloads.length && !activeGenerations.length && !activeStoryRenders.length)) {
         const detailed = await apiClient.getActiveTasks();
         activeDownloads = detailed.downloads;
@@ -76,43 +84,23 @@ export function useGlobalTaskActivity() {
         activeStoryRenders = detailed.story_renders ?? [];
       }
 
-      const currentActive = new Map<string, { message: string; kind: 'download' | 'generation' | 'story_render' }>();
-      for (const download of activeDownloads) {
-        currentActive.set(buildTaskKey('download', download.model_name), {
-          message: download.model_name,
-          kind: 'download',
+      try {
+        const eventBatch = await apiClient.getTaskEvents({
+          since_id: lastEventIdRef.current || undefined,
+          limit: 100,
         });
-      }
-      for (const generation of activeGenerations) {
-        currentActive.set(buildTaskKey('generation', generation.task_id), {
-          message: generation.text_preview || generation.task_id,
-          kind: 'generation',
-        });
-      }
-      for (const render of activeStoryRenders) {
-        currentActive.set(buildTaskKey('story_render', render.job_id), {
-          message: `Story job ${render.job_id}`,
-          kind: 'story_render',
-        });
-      }
-
-      const terminalEvents: GlobalTaskTerminalEvent[] = [];
-      for (const [taskKey, previousTask] of previousActiveTasksRef.current.entries()) {
-        if (currentActive.has(taskKey)) {
-          continue;
+        const terminalEvents: TaskTerminalEvent[] = eventBatch.events ?? [];
+        if (terminalEvents.length > 0) {
+          appendTerminalEvents(terminalEvents);
+          lastEventIdRef.current = eventBatch.last_id;
+        } else if (eventBatch.last_id && eventBatch.last_id > lastEventIdRef.current) {
+          lastEventIdRef.current = eventBatch.last_id;
         }
-        terminalEvents.push({
-          id: taskKey,
-          kind: previousTask.kind,
-          state: 'completed',
-          message: previousTask.message,
-          createdAt: Date.now(),
-        });
-      }
-      previousActiveTasksRef.current = currentActive;
-
-      if (terminalEvents.length) {
-        appendTerminalEvents(terminalEvents);
+      } catch (error) {
+        const status = (error as { status?: number })?.status;
+        if (status !== 404) {
+          throw error;
+        }
       }
 
       setSnapshot({
@@ -123,6 +111,12 @@ export function useGlobalTaskActivity() {
         activeGenerations,
         activeStoryRenders,
         activeCounts: counts,
+        modelOperation: {
+          busy: summaryModelBusy,
+          kind: summaryModelKind,
+          modelName: summaryModelName,
+          startedAt: summaryModelStartedAt,
+        },
       });
 
       if (activeGenerations.length > 0) {
@@ -213,4 +207,3 @@ export function useGlobalTaskActivity() {
     };
   }, [pollHealth]);
 }
-

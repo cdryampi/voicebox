@@ -22,10 +22,12 @@ import { Textarea } from '@/components/ui/textarea';
 import { LANGUAGE_OPTIONS } from '@/lib/constants/languages';
 import { useGenerationForm } from '@/lib/hooks/useGenerationForm';
 import { useProfile } from '@/lib/hooks/useProfiles';
+import { useGlobalTaskActivityStore } from '@/stores/globalTaskActivityStore';
 import { useUIStore } from '@/stores/uiStore';
 
 export function GenerationForm() {
   const selectedProfileId = useUIStore((state) => state.selectedProfileId);
+  const modelOperation = useGlobalTaskActivityStore((state) => state.modelOperation);
   const { data: selectedProfile } = useProfile(selectedProfileId || '');
 
   const { form, handleSubmit, isPending } = useGenerationForm();
@@ -173,7 +175,7 @@ export function GenerationForm() {
             <Button
               type="submit"
               className="w-full"
-              disabled={isPending || !selectedProfileId}
+              disabled={isPending || !selectedProfileId || modelOperation.busy}
             >
               {isPending ? (
                 <>
@@ -184,6 +186,12 @@ export function GenerationForm() {
                 'Generate Speech'
               )}
             </Button>
+            {modelOperation.busy && (
+              <div className="text-xs text-muted-foreground">
+                Model operation in progress ({modelOperation.kind} {modelOperation.modelName}). Wait
+                before generating audio.
+              </div>
+            )}
           </form>
         </Form>
       </CardContent>

@@ -89,6 +89,8 @@ class StoryRenderJob(Base):
     total_lines = Column(Integer, nullable=False, default=0)
     processed_lines = Column(Integer, nullable=False, default=0)
     error_summary = Column(Text, nullable=True)
+    failure_phase = Column(String, nullable=True)
+    failure_code = Column(String, nullable=True)
     output_audio_path = Column(String, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
@@ -416,6 +418,18 @@ def _run_migrations(engine):
             print("Migrating story_render_jobs: adding completed_at column")
             with engine.connect() as conn:
                 conn.execute(text("ALTER TABLE story_render_jobs ADD COLUMN completed_at DATETIME"))
+                conn.commit()
+        columns = {col['name'] for col in inspector.get_columns('story_render_jobs')}
+        if 'failure_phase' not in columns:
+            print("Migrating story_render_jobs: adding failure_phase column")
+            with engine.connect() as conn:
+                conn.execute(text("ALTER TABLE story_render_jobs ADD COLUMN failure_phase VARCHAR"))
+                conn.commit()
+        columns = {col['name'] for col in inspector.get_columns('story_render_jobs')}
+        if 'failure_code' not in columns:
+            print("Migrating story_render_jobs: adding failure_code column")
+            with engine.connect() as conn:
+                conn.execute(text("ALTER TABLE story_render_jobs ADD COLUMN failure_code VARCHAR"))
                 conn.commit()
 
     # Migration: ensure studio_drafts optional columns exist

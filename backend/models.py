@@ -2,6 +2,8 @@
 Pydantic models for request/response validation.
 """
 
+from __future__ import annotations
+
 from pydantic import BaseModel, Field
 from typing import Optional, List, Literal
 from datetime import datetime
@@ -267,6 +269,28 @@ class ActiveTasksSummaryResponse(BaseModel):
     story_renders_active: int
     has_active_tasks: bool
     downloading_models: List[str] = []
+    model_ops_busy: bool = False
+    model_op_kind: Optional[Literal["download", "activate", "delete"]] = None
+    model_op_model_name: Optional[str] = None
+    model_op_started_at: Optional[datetime] = None
+    last_terminal_event: Optional["TaskTerminalEvent"] = None
+
+
+class TaskTerminalEvent(BaseModel):
+    """Terminal transition event for tracked long-running tasks."""
+    id: int
+    kind: Literal["generation", "download", "story_render", "model_op"]
+    state: Literal["completed", "failed"]
+    entity_id: str
+    message: str
+    error_code: Optional[str] = None
+    created_at: datetime
+
+
+class TaskEventsResponse(BaseModel):
+    """Incremental terminal task event feed."""
+    events: List[TaskTerminalEvent] = Field(default_factory=list)
+    last_id: int = 0
 
 
 class AudioChannelCreate(BaseModel):
@@ -476,7 +500,11 @@ class StoryRenderStatusResponse(BaseModel):
     status: str
     total_lines: int
     processed_lines: int
+    completed_lines: int
+    failed_lines: int = 0
     error_summary: Optional[str]
+    failure_phase: Optional[Literal["preflight", "line_generation", "mix_export"]] = None
+    failure_code: Optional[str] = None
     output_audio_path: Optional[str]
     created_at: datetime
     updated_at: datetime

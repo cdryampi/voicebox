@@ -49,6 +49,19 @@ from .utils.groq import (
     list_available_groq_models,
 )
 import numpy as np
+
+
+def _story_render_error_code(error: Exception) -> str:
+    message = str(error).lower()
+    if "profile" in message and "not found" in message:
+        return "PROFILE_NOT_FOUND"
+    if "sample" in message and "not found" in message:
+        return "PROFILE_SAMPLE_MISSING"
+    if "cuda" in message:
+        return "STORY_RENDER_CUDA_ERROR"
+    if "model" in message and "download" in message:
+        return "MODEL_DOWNLOADING"
+    return "STORY_RENDER_LINE_FAILED"
 	
 	
 def _get_stories_output_dir() -> Path:
@@ -1230,6 +1243,8 @@ async def create_story_render_from_history(
         status="queued",
         total_lines=len(data.lines),
         processed_lines=0,
+        failure_phase=None,
+        failure_code=None,
         created_at=datetime.utcnow(),
         updated_at=datetime.utcnow(),
     )
@@ -1325,7 +1340,12 @@ async def _run_story_render_job_background(
     settings = load_settings()
     task_manager = get_task_manager()
     if db_module.SessionLocal is None:
-        task_manager.complete_story_render(job_id, status="failed", error="Database session not initialized")
+        task_manager.complete_story_render(
+            job_id,
+            status="failed",
+            error="Database session not initialized",
+            error_code="STORY_RENDER_DB_NOT_INITIALIZED",
+        )
         return
     db = db_module.SessionLocal()
     errors: List[str] = []
@@ -1334,10 +1354,17 @@ async def _run_story_render_job_background(
         async with _STORY_RENDER_SEMAPHORE:
             job = db.query(DBStoryRenderJob).filter_by(id=job_id).first()
             if not job:
-                task_manager.complete_story_render(job_id, status="failed", error="Job not found")
+                task_manager.complete_story_render(
+                    job_id,
+                    status="failed",
+                    error="Job not found",
+                    error_code="STORY_RENDER_JOB_NOT_FOUND",
+                )
                 return
 
             job.status = "running"
+            job.failure_phase = None
+            job.failure_code = None
             job.updated_at = datetime.utcnow()
             db.commit()
 
@@ -1461,24 +1488,42 @@ async def _run_story_render_job_background(
             if not job:
                 return
 
+            failed_lines = sum(1 for line in script_lines if line.status == "failed")
             if processed_lines == 0:
                 job.status = "failed"
+                job.failure_phase = "line_generation"
+                job.failure_code = "STORY_RENDER_LINE_FAILED"
             elif errors:
                 job.status = "partial_failed"
+                job.failure_phase = "line_generation"
+                job.failure_code = "STORY_RENDER_LINE_FAILED"
             else:
                 job.status = "completed"
+                job.failure_phase = None
+                job.failure_code = None
 
             if errors:
                 job.error_summary = " | ".join(errors[:5])
 
             if processed_lines > 0:
-                audio_bytes = await export_story_audio(job.story_id, db)
-                if audio_bytes:
-                    story_dir = _get_stories_output_dir() / job.story_id
-                    story_dir.mkdir(parents=True, exist_ok=True)
-                    output_path = story_dir / "final_mix.wav"
-                    output_path.write_bytes(audio_bytes)
-                    job.output_audio_path = str(output_path)
+                try:
+                    audio_bytes = await export_story_audio(job.story_id, db)
+                    if audio_bytes:
+                        story_dir = _get_stories_output_dir() / job.story_id
+                        story_dir.mkdir(parents=True, exist_ok=True)
+                        output_path = story_dir / "final_mix.wav"
+                        output_path.write_bytes(audio_bytes)
+                        job.output_audio_path = str(output_path)
+                    elif job.status == "completed":
+                        job.status = "failed"
+                        job.failure_phase = "mix_export"
+                        job.failure_code = "STORY_RENDER_MIX_EXPORT_FAILED"
+                        job.error_summary = "Could not export final story mix audio."
+                except Exception as mix_error:
+                    job.status = "failed"
+                    job.failure_phase = "mix_export"
+                    job.failure_code = "STORY_RENDER_MIX_EXPORT_FAILED"
+                    job.error_summary = str(mix_error)[:1000]
 
             job.completed_at = datetime.utcnow()
             job.updated_at = datetime.utcnow()
@@ -1488,6 +1533,7 @@ async def _run_story_render_job_background(
                 job_id,
                 status=job.status,
                 error=job.error_summary,
+                error_code=job.failure_code,
             )
     except Exception as job_error:
         db.rollback()
@@ -1495,10 +1541,17 @@ async def _run_story_render_job_background(
         if job:
             job.status = "failed"
             job.error_summary = str(job_error)[:1000]
+            job.failure_phase = "line_generation"
+            job.failure_code = _story_render_error_code(job_error)
             job.completed_at = datetime.utcnow()
             job.updated_at = datetime.utcnow()
             db.commit()
-        task_manager.complete_story_render(job_id, status="failed", error=str(job_error))
+        task_manager.complete_story_render(
+            job_id,
+            status="failed",
+            error=str(job_error),
+            error_code=_story_render_error_code(job_error),
+        )
     finally:
         db.close()
 
@@ -1541,13 +1594,18 @@ async def get_story_render_status(
             )
         )
 
+    failed_lines = sum(1 for line in line_statuses if line.status == "failed")
     return StoryRenderStatusResponse(
         job_id=job.id,
         story_id=job.story_id,
         status=job.status,
         total_lines=job.total_lines,
         processed_lines=job.processed_lines,
+        completed_lines=job.processed_lines,
+        failed_lines=failed_lines,
         error_summary=job.error_summary,
+        failure_phase=job.failure_phase,
+        failure_code=job.failure_code,
         output_audio_path=job.output_audio_path,
         created_at=job.created_at,
         updated_at=job.updated_at,

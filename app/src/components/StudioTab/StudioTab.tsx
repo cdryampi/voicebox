@@ -40,6 +40,7 @@ import {
   useStudioDrafts,
   useUpdateStudioDraftLines,
 } from '@/lib/hooks/useStories';
+import { useGlobalTaskActivityStore } from '@/stores/globalTaskActivityStore';
 import { useStoryStore } from '@/stores/storyStore';
 
 const EMOTION_OPTIONS: EmotionType[] = [
@@ -92,6 +93,7 @@ export function StudioTab() {
   const { notify } = useNotifier();
   const selectedStoryId = useStoryStore((state) => state.selectedStoryId);
   const setSelectedStoryId = useStoryStore((state) => state.setSelectedStoryId);
+  const modelOperation = useGlobalTaskActivityStore((state) => state.modelOperation);
 
   const { data: stories } = useStories();
   const { data: profiles } = useProfiles();
@@ -576,6 +578,13 @@ export function StudioTab() {
 
   const handlePreviewLine = async (lineId: string) => {
     if (!draftId) return;
+    if (modelOpsBusy) {
+      toast({
+        title: 'Model operation in progress',
+        description: `Wait for current operation to finish: ${modelOpsLabel || 'processing'}.`,
+      });
+      return;
+    }
     try {
       const existingUrl = previewAudioUrlsRef.current.get(lineId);
       if (existingUrl) {
@@ -603,6 +612,13 @@ export function StudioTab() {
 
   const handleRenderFinal = async () => {
     if (!draftId) return;
+    if (modelOpsBusy) {
+      toast({
+        title: 'Model operation in progress',
+        description: `Wait for current operation to finish: ${modelOpsLabel || 'processing'}.`,
+      });
+      return;
+    }
     const saved = await persistDraft(true);
     if (!saved) return;
     try {
@@ -654,6 +670,9 @@ export function StudioTab() {
       }
 
       if (event.key === 'Enter' && activeLineId && draftId) {
+        if (modelOpsBusy) {
+          return;
+        }
         event.preventDefault();
         void handlePreviewLine(activeLineId);
       }
@@ -663,7 +682,7 @@ export function StudioTab() {
     return () => {
       window.removeEventListener('keydown', onKeyDown);
     };
-  }, [activeLineId, draftId, lines]);
+  }, [activeLineId, draftId, lines, modelOpsBusy]);
 
   const updateLine = (lineId: string, patch: Partial<StudioDraftLineResponse>) => {
     setLines((prev) =>
@@ -753,6 +772,10 @@ export function StudioTab() {
 
   const characterOptions = mappings.map((m) => m.character_name);
   const charLimit = clampLimits(maxCharsPerLine, 20, 1500, 300);
+  const modelOpsBusy = modelOperation.busy;
+  const modelOpsLabel = modelOpsBusy
+    ? `${modelOperation.kind ?? 'operation'} ${modelOperation.modelName ?? ''}`.trim()
+    : '';
 
   return (
     <div className="flex h-full min-h-0 gap-6 overflow-hidden">
@@ -949,6 +972,15 @@ export function StudioTab() {
       </div>
 
       <div className="flex-1 min-h-0 flex flex-col gap-4 overflow-y-auto pr-1">
+        {modelOpsBusy && (
+          <Card className="border-amber-300/60 bg-amber-50/40">
+            <CardContent className="pt-4 text-sm text-amber-900">
+              Model operation in progress: <span className="font-medium">{modelOpsLabel}</span>.
+              Preview and final render are temporarily locked.
+            </CardContent>
+          </Card>
+        )}
+
         <Card>
           <CardHeader className="pb-3">
             <CardTitle className="text-base flex items-center gap-2">
@@ -1328,7 +1360,7 @@ export function StudioTab() {
                       type="button"
                       size="sm"
                       onClick={() => handlePreviewLine(line.id)}
-                      disabled={generatePreview.isPending}
+                      disabled={generatePreview.isPending || modelOpsBusy}
                     >
                       {line.preview_audio_url
                         ? `Regenerate ${previewSeconds}s`
@@ -1357,8 +1389,17 @@ export function StudioTab() {
                     Status: <span className="font-medium">{renderJobStatus.status}</span>
                   </div>
                   <div className="text-xs text-muted-foreground">
-                    Progress: {renderJobStatus.processed_lines}/{renderJobStatus.total_lines}
+                    Progress: {renderJobStatus.completed_lines}/{renderJobStatus.total_lines}
+                    {renderJobStatus.failed_lines > 0
+                      ? ` · Failed ${renderJobStatus.failed_lines}`
+                      : ''}
                   </div>
+                  {renderJobStatus.failure_phase && (
+                    <div className="text-xs text-destructive">
+                      Failure phase: {renderJobStatus.failure_phase}
+                      {renderJobStatus.failure_code ? ` (${renderJobStatus.failure_code})` : ''}
+                    </div>
+                  )}
                   {renderJobStatus.error_summary && (
                     <div className="text-xs text-destructive">{renderJobStatus.error_summary}</div>
                   )}
@@ -1382,6 +1423,12 @@ export function StudioTab() {
                       Open Story Player
                     </Button>
                   )}
+                  {(renderJobStatus.status === 'failed' ||
+                    renderJobStatus.status === 'partial_failed') && (
+                    <Button size="sm" variant="ghost" onClick={() => navigate({ to: '/server' })}>
+                      Open Server Logs
+                    </Button>
+                  )}
                 </>
               ) : (
                 <div className="text-xs text-muted-foreground">Polling render status...</div>
@@ -1400,7 +1447,7 @@ export function StudioTab() {
           </Button>
           <Button
             onClick={handleRenderFinal}
-            disabled={!draftId || renderFinal.isPending || !lines.length}
+            disabled={!draftId || renderFinal.isPending || !lines.length || modelOpsBusy}
           >
             Render Final
           </Button>

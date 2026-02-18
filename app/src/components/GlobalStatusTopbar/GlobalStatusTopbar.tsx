@@ -7,11 +7,12 @@ import { useNotifier } from '@/lib/hooks/useNotifier';
 import { useGlobalTaskActivityStore } from '@/stores/globalTaskActivityStore';
 
 function formatTerminalEventLabel(
-  kind: 'download' | 'generation' | 'story_render',
+  kind: 'download' | 'generation' | 'story_render' | 'model_op',
   message: string,
 ): string {
   if (kind === 'download') return `Model download: ${message}`;
   if (kind === 'story_render') return `Story render: ${message}`;
+  if (kind === 'model_op') return `Model op: ${message}`;
   return `Generation: ${message}`;
 }
 
@@ -24,6 +25,7 @@ export function GlobalStatusTopbar() {
   const activeGenerations = useGlobalTaskActivityStore((state) => state.activeGenerations);
   const activeStoryRenders = useGlobalTaskActivityStore((state) => state.activeStoryRenders);
   const lastTerminalEvent = useGlobalTaskActivityStore((state) => state.lastTerminalEvent);
+  const modelOperation = useGlobalTaskActivityStore((state) => state.modelOperation);
   const { notify } = useNotifier();
 
   const [isExpanded, setIsExpanded] = useState(false);
@@ -31,9 +33,12 @@ export function GlobalStatusTopbar() {
 
   useEffect(() => {
     const shouldExpand =
-      connectionState !== 'connected' || hasActiveTasks || lastTerminalEvent?.state === 'failed';
+      connectionState !== 'connected' ||
+      hasActiveTasks ||
+      modelOperation.busy ||
+      lastTerminalEvent?.state === 'failed';
     setIsExpanded(shouldExpand);
-  }, [connectionState, hasActiveTasks, lastTerminalEvent?.state]);
+  }, [connectionState, hasActiveTasks, modelOperation.busy, lastTerminalEvent?.state]);
 
   useEffect(() => {
     const previous = previousConnectionStateRef.current;
@@ -59,9 +64,10 @@ export function GlobalStatusTopbar() {
     previousConnectionStateRef.current = connectionState;
   }, [connectionState, notify]);
 
+  const isBusy = hasActiveTasks || modelOperation.busy;
   const stateColorClass =
     connectionState === 'connected'
-      ? hasActiveTasks
+      ? isBusy
         ? 'bg-amber-500'
         : 'bg-emerald-500'
       : connectionState === 'degraded'
@@ -70,7 +76,7 @@ export function GlobalStatusTopbar() {
 
   const stateText =
     connectionState === 'connected'
-      ? hasActiveTasks
+      ? isBusy
         ? 'Working'
         : 'Connected'
       : connectionState === 'degraded'
@@ -84,13 +90,19 @@ export function GlobalStatusTopbar() {
           <div className="flex items-center gap-3 min-w-0">
             <span className={`h-2.5 w-2.5 rounded-full ${stateColorClass}`} />
             <div className="text-xs font-medium">{stateText}</div>
-            {(hasActiveTasks || connectionState !== 'connected') && (
+            {(isBusy || connectionState !== 'connected') && (
               <Loader2 className="h-3.5 w-3.5 animate-spin text-muted-foreground" />
             )}
             <div className="flex items-center gap-2 text-[11px] text-muted-foreground">
               <span>Gen {activeCounts.generations}</span>
               <span>Render {activeCounts.storyRenders}</span>
               <span>DL {activeCounts.downloads}</span>
+              {modelOperation.busy && (
+                <span>
+                  Model {modelOperation.kind}:{' '}
+                  {modelOperation.modelName || 'processing'}
+                </span>
+              )}
             </div>
           </div>
           <div className="flex items-center gap-2">
@@ -154,6 +166,14 @@ export function GlobalStatusTopbar() {
                     ))}
                   </div>
                 )}
+                {modelOperation.busy && (
+                  <div className="text-xs flex items-center gap-2">
+                    <Loader2 className="h-3.5 w-3.5 animate-spin text-amber-500" />
+                    <span>
+                      Model operation in progress: {modelOperation.kind} {modelOperation.modelName}
+                    </span>
+                  </div>
+                )}
                 {lastTerminalEvent && (
                   <div className="pt-1 text-xs text-muted-foreground">
                     Last event:{' '}
@@ -164,6 +184,16 @@ export function GlobalStatusTopbar() {
                     >
                       {formatTerminalEventLabel(lastTerminalEvent.kind, lastTerminalEvent.message)}
                     </span>
+                    {lastTerminalEvent.error_code && (
+                      <span className="ml-2 text-[10px] uppercase tracking-wide text-muted-foreground/80">
+                        {lastTerminalEvent.error_code}
+                      </span>
+                    )}
+                    {lastTerminalEvent.state === 'failed' && (
+                      <Button size="sm" variant="ghost" asChild className="ml-2 h-6 px-2 text-[11px]">
+                        <Link to="/server">Open Logs</Link>
+                      </Button>
+                    )}
                   </div>
                 )}
               </div>

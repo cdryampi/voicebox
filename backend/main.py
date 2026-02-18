@@ -105,6 +105,50 @@ def _is_cuda_assert_error(exc: Exception) -> bool:
     return "device-side assert" in str(exc).lower()
 
 
+def _get_loaded_tts_model_size(tts_model) -> Optional[str]:
+    """Best-effort read of currently loaded TTS model size."""
+    try:
+        if not tts_model.is_loaded():
+            return None
+        loaded_size = getattr(tts_model, "_current_model_size", None)
+        if loaded_size:
+            return loaded_size
+        return getattr(tts_model, "model_size", None)
+    except Exception:
+        return None
+
+
+def _extract_error_message_and_code(detail: object) -> tuple[str, Optional[str]]:
+    """Normalize FastAPI error detail payload into message + optional error code."""
+    if isinstance(detail, str):
+        return detail, None
+    if isinstance(detail, dict):
+        message = str(detail.get("message") or detail.get("detail") or detail)
+        error_code = detail.get("error_code")
+        if error_code is not None:
+            error_code = str(error_code)
+        return message, error_code
+    return str(detail), None
+
+
+def _model_operation_conflict_response(task_manager, requested_kind: str, requested_model: str) -> JSONResponse:
+    active_op = task_manager.get_model_operation_state()
+    return JSONResponse(
+        status_code=409,
+        content={
+            "detail": "Another model operation is already in progress.",
+            "error_code": "MODEL_OPERATION_IN_PROGRESS",
+            "requested_operation": requested_kind,
+            "requested_model_name": requested_model,
+            "active_operation": {
+                "kind": active_op.kind if active_op else None,
+                "model_name": active_op.model_name if active_op else None,
+                "started_at": active_op.started_at.isoformat() if active_op else None,
+            },
+        },
+    )
+
+
 @app.middleware("http")
 async def api_key_middleware(request: Request, call_next):
     if request.method != "OPTIONS" and request.url.path not in PUBLIC_PATHS:
@@ -715,8 +759,11 @@ async def generate_speech(
 ):
     """Generate speech from text using a voice profile."""
     task_manager = get_task_manager()
+    if task_manager.get_model_operation_state() is not None:
+        return _model_operation_conflict_response(task_manager, "generate", "tts")
     generation_id = str(uuid.uuid4())
     started_generation_task = False
+    generation_failed = False
 
     try:
         # Start tracking generation
@@ -752,6 +799,20 @@ async def generate_speech(
         # Load the requested model size if different from current (async to not block)
         defaults = _get_runtime_model_defaults(db)
         model_size = data.model_size or defaults.default_tts_model_size
+
+        if _is_cuda_single_model_mode() and model_size == "1.7B":
+            loaded_tts_size = _get_loaded_tts_model_size(tts_model)
+            if loaded_tts_size and loaded_tts_size != "1.7B":
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        "message": (
+                            "Switching from Qwen TTS 0.6B to 1.7B in a live Colab CUDA session is blocked "
+                            "for stability. Restart backend and activate 1.7B first."
+                        ),
+                        "error_code": "MODEL_SWITCH_REQUIRES_RESTART",
+                    },
+                )
 
         # Check if model needs to be downloaded first
         model_path = tts_model._get_model_path(model_size)
@@ -815,12 +876,26 @@ async def generate_speech(
         
         return generation
 
-    except HTTPException:
+    except HTTPException as e:
+        if started_generation_task and e.status_code >= 400:
+            generation_failed = True
+            error_message, error_code = _extract_error_message_and_code(e.detail)
+            task_manager.fail_generation(generation_id, error_message, error_code=error_code)
         raise
     except ValueError as e:
+        if started_generation_task:
+            generation_failed = True
+            task_manager.fail_generation(generation_id, str(e), error_code="GENERATION_VALIDATION_ERROR")
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         if _is_cuda_assert_error(e):
+            if started_generation_task:
+                generation_failed = True
+                task_manager.fail_generation(
+                    generation_id,
+                    "CUDA runtime entered invalid state; restart backend process in Colab and retry.",
+                    error_code="MODEL_GENERATE_CUDA_ASSERT",
+                )
             logger.error(
                 "MODEL_GENERATE_CUDA_ASSERT generation_id=%s profile_id=%s",
                 generation_id,
@@ -831,9 +906,12 @@ async def generate_speech(
                 status_code=503,
                 detail="CUDA runtime entered invalid state; restart backend process in Colab and retry.",
             ) from e
+        if started_generation_task:
+            generation_failed = True
+            task_manager.fail_generation(generation_id, str(e), error_code="GENERATION_RUNTIME_ERROR")
         raise HTTPException(status_code=500, detail=str(e))
     finally:
-        if started_generation_task:
+        if started_generation_task and not generation_failed:
             task_manager.complete_generation(generation_id)
 
 
@@ -1246,6 +1324,9 @@ async def generate_studio_preview(
     db: Session = Depends(get_db),
 ):
     """Generate or regenerate a short preview for one Studio card."""
+    task_manager = get_task_manager()
+    if task_manager.get_model_operation_state() is not None:
+        return _model_operation_conflict_response(task_manager, "preview", "tts")
     try:
         return await studio_drafts.generate_studio_line_preview(draft_id, line_id, db)
     except ValueError as e:
@@ -1614,7 +1695,41 @@ async def activate_model(data: models.ModelDownloadRequest):
     """Load a downloaded model into memory and make it active for runtime."""
     model_name = data.model_name
     warning_message: Optional[str] = None
+    task_manager = get_task_manager()
+    model_op_started = False
+    model_op_completed = False
+    model_op_error_code = "MODEL_ACTIVATE_RUNTIME_ERROR"
+    model_op_error_message = f"Model activate failed: {model_name}"
     try:
+        known_models = {
+            "qwen-tts-1.7B",
+            "qwen-tts-0.6B",
+            "whisper-base",
+            "whisper-small",
+            "whisper-medium",
+            "whisper-large",
+        }
+        if model_name not in known_models:
+            raise HTTPException(status_code=400, detail=f"Unknown model: {model_name}")
+
+        if _is_cuda_single_model_mode() and model_name == "qwen-tts-1.7B":
+            loaded_tts_size = _get_loaded_tts_model_size(tts.get_tts_model())
+            if loaded_tts_size and loaded_tts_size != "1.7B":
+                return JSONResponse(
+                    status_code=409,
+                    content={
+                        "detail": (
+                            "Switching from Qwen TTS 0.6B to 1.7B in a live Colab CUDA session is blocked "
+                            "for stability. Restart backend and activate 1.7B first."
+                        ),
+                        "error_code": "MODEL_SWITCH_REQUIRES_RESTART",
+                    },
+                )
+
+        if not task_manager.start_model_operation("activate", model_name):
+            return _model_operation_conflict_response(task_manager, "activate", model_name)
+        model_op_started = True
+
         if _is_cuda_single_model_mode():
             if model_name.startswith("qwen-tts"):
                 whisper_model = transcribe.get_whisper_model()
@@ -1645,21 +1760,33 @@ async def activate_model(data: models.ModelDownloadRequest):
 
         if model_name == "qwen-tts-1.7B":
             await tts.get_tts_model().load_model_async("1.7B")
+            task_manager.complete_model_operation(f"Model activated: {model_name}")
+            model_op_completed = True
             return {"message": "Model qwen-tts-1.7B activated", "warning": warning_message}
         if model_name == "qwen-tts-0.6B":
             await tts.get_tts_model().load_model_async("0.6B")
+            task_manager.complete_model_operation(f"Model activated: {model_name}")
+            model_op_completed = True
             return {"message": "Model qwen-tts-0.6B activated", "warning": warning_message}
         if model_name == "whisper-base":
             await transcribe.get_whisper_model().load_model_async("base")
+            task_manager.complete_model_operation(f"Model activated: {model_name}")
+            model_op_completed = True
             return {"message": "Model whisper-base activated", "warning": warning_message}
         if model_name == "whisper-small":
             await transcribe.get_whisper_model().load_model_async("small")
+            task_manager.complete_model_operation(f"Model activated: {model_name}")
+            model_op_completed = True
             return {"message": "Model whisper-small activated", "warning": warning_message}
         if model_name == "whisper-medium":
             await transcribe.get_whisper_model().load_model_async("medium")
+            task_manager.complete_model_operation(f"Model activated: {model_name}")
+            model_op_completed = True
             return {"message": "Model whisper-medium activated", "warning": warning_message}
         if model_name == "whisper-large":
             await transcribe.get_whisper_model().load_model_async("large")
+            task_manager.complete_model_operation(f"Model activated: {model_name}")
+            model_op_completed = True
             return {"message": "Model whisper-large activated", "warning": warning_message}
     except Exception as e:
         backend_type = get_backend_type()
@@ -1679,6 +1806,10 @@ async def activate_model(data: models.ModelDownloadRequest):
         )
 
         if "device-side assert" in normalized_error:
+            model_op_error_code = "MODEL_ACTIVATE_CUDA_ASSERT"
+            model_op_error_message = (
+                "CUDA runtime entered invalid state; restart backend process in Colab and retry."
+            )
             logger.error(
                 "MODEL_ACTIVATE_CUDA_ASSERT model=%s backend=%s device=%s dtype=%s",
                 model_name,
@@ -1702,8 +1833,10 @@ async def activate_model(data: models.ModelDownloadRequest):
                 "error_code": "MODEL_ACTIVATE_RUNTIME_ERROR",
             },
         )
-
-    raise HTTPException(status_code=400, detail=f"Unknown model: {model_name}")
+    finally:
+        if model_op_started and not model_op_completed:
+            # Some branches return JSONResponse on errors; ensure lock is released and event recorded.
+            task_manager.fail_model_operation(model_op_error_message, error_code=model_op_error_code)
 
 
 @app.get("/models/progress/{model_name}")
@@ -2022,6 +2155,9 @@ async def trigger_model_download(request: models.ModelDownloadRequest):
     
     if request.model_name not in model_configs:
         raise HTTPException(status_code=400, detail=f"Unknown model: {request.model_name}")
+
+    if not task_manager.start_model_operation("download", request.model_name):
+        return _model_operation_conflict_response(task_manager, "download", request.model_name)
     
     config = model_configs[request.model_name]
     
@@ -2033,27 +2169,47 @@ async def trigger_model_download(request: models.ModelDownloadRequest):
             # If it's a coroutine, await it
             if asyncio.iscoroutine(result):
                 await result
-            task_manager.complete_download(request.model_name)
+            task_manager.complete_download(
+                request.model_name,
+                message=f"Model download completed: {request.model_name}",
+            )
+            task_manager.complete_model_operation(
+                message=f"Model download completed: {request.model_name}",
+            )
         except Exception as e:
-            task_manager.error_download(request.model_name, str(e))
+            task_manager.error_download(
+                request.model_name,
+                str(e),
+                error_code="MODEL_DOWNLOAD_FAILED",
+            )
+            task_manager.fail_model_operation(str(e), error_code="MODEL_DOWNLOAD_FAILED")
 
-    # Start tracking download
-    task_manager.start_download(request.model_name)
-    
-    # Initialize progress state so SSE endpoint has initial data to send.
-    # This fixes a race condition where the frontend connects to SSE before
-    # any progress callbacks have fired (especially for large models like Qwen
-    # where huggingface_hub takes time to fetch metadata for all files).
-    progress_manager.update_progress(
-        model_name=request.model_name,
-        current=0,
-        total=0,  # Will be updated once actual total is known
-        filename="Connecting to HuggingFace...",
-        status="downloading",
-    )
+    try:
+        # Start tracking download
+        task_manager.start_download(request.model_name)
+        
+        # Initialize progress state so SSE endpoint has initial data to send.
+        # This fixes a race condition where the frontend connects to SSE before
+        # any progress callbacks have fired (especially for large models like Qwen
+        # where huggingface_hub takes time to fetch metadata for all files).
+        progress_manager.update_progress(
+            model_name=request.model_name,
+            current=0,
+            total=0,  # Will be updated once actual total is known
+            filename="Connecting to HuggingFace...",
+            status="downloading",
+        )
 
-    # Start download in background task (don't await)
-    asyncio.create_task(download_in_background())
+        # Start download in background task (don't await)
+        asyncio.create_task(download_in_background())
+    except Exception as e:
+        task_manager.error_download(
+            request.model_name,
+            str(e),
+            error_code="MODEL_DOWNLOAD_START_FAILED",
+        )
+        task_manager.fail_model_operation(str(e), error_code="MODEL_DOWNLOAD_START_FAILED")
+        raise HTTPException(status_code=500, detail=str(e))
 
     # Return immediately - frontend should poll progress endpoint
     return {"message": f"Model {request.model_name} download started"}
@@ -2063,8 +2219,12 @@ async def trigger_model_download(request: models.ModelDownloadRequest):
 async def delete_model(model_name: str):
     """Delete a downloaded model from the HuggingFace cache."""
     import shutil
-    import os
     from huggingface_hub import constants as hf_constants
+    task_manager = get_task_manager()
+    model_op_started = False
+    model_op_completed = False
+    model_op_error_code = "MODEL_DELETE_FAILED"
+    model_op_error_message = f"Model delete failed: {model_name}"
     
     # Map model names to HuggingFace repo IDs
     model_configs = {
@@ -2103,6 +2263,10 @@ async def delete_model(model_name: str):
     if model_name not in model_configs:
         raise HTTPException(status_code=400, detail=f"Unknown model: {model_name}")
     
+    if not task_manager.start_model_operation("delete", model_name):
+        return _model_operation_conflict_response(task_manager, "delete", model_name)
+    model_op_started = True
+
     config = model_configs[model_name]
     hf_repo_id = config["hf_repo_id"]
     
@@ -2134,12 +2298,20 @@ async def delete_model(model_name: str):
                 detail=f"Failed to delete model cache directory: {str(e)}"
             )
         
+        task_manager.complete_model_operation(message=f"Model deleted: {model_name}")
+        model_op_completed = True
         return {"message": f"Model {model_name} deleted successfully"}
         
     except HTTPException:
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to delete model: {str(e)}")
+    finally:
+        if model_op_started and not model_op_completed:
+            task_manager.fail_model_operation(
+                model_op_error_message,
+                error_code=model_op_error_code,
+            )
 
 
 @app.post("/cache/clear")
@@ -2234,6 +2406,18 @@ def _collect_active_task_payload() -> tuple[
     return active_downloads, active_generations, active_story_renders
 
 
+def _to_task_terminal_event_model(event) -> models.TaskTerminalEvent:
+    return models.TaskTerminalEvent(
+        id=event.id,
+        kind=event.kind,
+        state=event.state,
+        entity_id=event.entity_id,
+        message=event.message,
+        error_code=event.error_code,
+        created_at=event.created_at,
+    )
+
+
 @app.get("/tasks/active", response_model=models.ActiveTasksResponse)
 async def get_active_tasks():
     """Return all currently active downloads and generations."""
@@ -2249,14 +2433,37 @@ async def get_active_tasks():
 @app.get("/tasks/summary", response_model=models.ActiveTasksSummaryResponse)
 async def get_active_tasks_summary():
     """Compact active task summary suitable for lightweight polling."""
+    task_manager = get_task_manager()
     active_downloads, active_generations, active_story_renders = _collect_active_task_payload()
+    model_op = task_manager.get_model_operation_state()
+    last_terminal_event = task_manager.get_last_terminal_event()
     return models.ActiveTasksSummaryResponse(
         downloads_active=len(active_downloads),
         generations_active=len(active_generations),
         story_renders_active=len(active_story_renders),
         has_active_tasks=bool(active_downloads or active_generations or active_story_renders),
         downloading_models=sorted([task.model_name for task in active_downloads]),
+        model_ops_busy=model_op is not None,
+        model_op_kind=model_op.kind if model_op else None,
+        model_op_model_name=model_op.model_name if model_op else None,
+        model_op_started_at=model_op.started_at if model_op else None,
+        last_terminal_event=_to_task_terminal_event_model(last_terminal_event)
+        if last_terminal_event
+        else None,
     )
+
+
+@app.get("/tasks/events", response_model=models.TaskEventsResponse)
+async def get_task_events(
+    limit: int = 30,
+    since_id: Optional[int] = None,
+):
+    """Return terminal task events for frontend operational state."""
+    task_manager = get_task_manager()
+    events = task_manager.list_terminal_events(since_id=since_id, limit=limit)
+    serialized = [_to_task_terminal_event_model(event) for event in events]
+    last_id = serialized[-1].id if serialized else (since_id or 0)
+    return models.TaskEventsResponse(events=serialized, last_id=last_id)
 
 
 # ============================================

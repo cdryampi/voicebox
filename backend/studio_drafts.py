@@ -14,9 +14,11 @@ from sqlalchemy.orm import Session
 
 from . import config, profiles, stories, tts
 from .database import (
+    ProfileSample as DBProfileSample,
     StudioDraft as DBStudioDraft,
     StudioDraftLine as DBStudioDraftLine,
     Story as DBStory,
+    StoryRenderJob as DBStoryRenderJob,
     VoiceProfile as DBVoiceProfile,
 )
 from .models import (
@@ -46,6 +48,7 @@ from .utils.groq import (
     compose_studio_director_suggestions_with_groq,
     list_available_groq_models,
 )
+from .utils.tasks import get_task_manager
 
 
 _ALLOWED_EMOTIONS: set[str] = {
@@ -69,6 +72,114 @@ _EMOTION_GUIDANCE = {
 }
 
 _SUPPORTED_LANGUAGES = {"zh", "en", "ja", "ko", "de", "fr", "ru", "pt", "es", "it"}
+
+
+def _has_profile_samples(profile_id: str, db: Session) -> bool:
+    return (
+        db.query(DBProfileSample)
+        .filter(DBProfileSample.profile_id == profile_id)
+        .count()
+        > 0
+    )
+
+
+def _create_failed_preflight_job(
+    *,
+    story_id: str,
+    total_lines: int,
+    message: str,
+    code: str,
+    db: Session,
+) -> DBStoryRenderJob:
+    job = DBStoryRenderJob(
+        id=str(uuid.uuid4()),
+        story_id=story_id,
+        status="failed",
+        total_lines=total_lines,
+        processed_lines=0,
+        error_summary=message[:1000],
+        failure_phase="preflight",
+        failure_code=code,
+        created_at=datetime.utcnow(),
+        updated_at=datetime.utcnow(),
+        completed_at=datetime.utcnow(),
+    )
+    db.add(job)
+    db.commit()
+    return job
+
+
+def _run_studio_render_preflight(
+    draft: DBStudioDraft,
+    lines: List[DBStudioDraftLine],
+    character_mappings: List[StoryCharacterMapping],
+    db: Session,
+) -> tuple[bool, Optional[str], Optional[str]]:
+    active_model_op = get_task_manager().get_model_operation_state()
+    if active_model_op is not None:
+        return (
+            False,
+            f"Model operation in progress: {active_model_op.kind} {active_model_op.model_name}",
+            "MODEL_OPERATION_IN_PROGRESS",
+        )
+
+    if not lines:
+        return False, "Draft has no lines to render", "STORY_RENDER_PREFLIGHT_NO_LINES"
+
+    limits = _parse_limits_from_db(draft.limits_json)
+    max_chars = limits.max_chars_per_line
+    for idx, line in enumerate(lines):
+        if not (line.text or "").strip():
+            return (
+                False,
+                f"Line #{idx + 1} is empty",
+                "STORY_RENDER_PREFLIGHT_EMPTY_LINE",
+            )
+        if len(line.text) > max_chars:
+            return (
+                False,
+                f"Line #{idx + 1} exceeds max chars ({len(line.text)} > {max_chars})",
+                "STORY_RENDER_PREFLIGHT_LINE_TOO_LONG",
+            )
+
+    model_size = draft.model_size or load_settings().default_model_size
+    if model_size not in {"0.6B", "1.7B"}:
+        return False, f"Unsupported model size: {model_size}", "STORY_RENDER_PREFLIGHT_MODEL_INVALID"
+
+    tts_model = tts.get_tts_model()
+    loaded_size = getattr(tts_model, "_current_model_size", None) or getattr(tts_model, "model_size", None)
+    settings = load_settings()
+    if (
+        settings.colab_profile
+        and model_size == "1.7B"
+        and loaded_size
+        and loaded_size != "1.7B"
+    ):
+        return (
+            False,
+            "Switching from Qwen TTS 0.6B to 1.7B in live Colab session requires backend restart",
+            "MODEL_SWITCH_REQUIRES_RESTART",
+        )
+
+    mapping_profiles = {mapping.profile_id for mapping in character_mappings}
+    line_profiles = {line.profile_id for line in lines}
+    profile_ids = mapping_profiles | line_profiles
+    for profile_id in profile_ids:
+        profile = db.query(DBVoiceProfile).filter_by(id=profile_id).first()
+        if not profile:
+            return (
+                False,
+                f"Profile not found for render preflight: {profile_id}",
+                "PROFILE_NOT_FOUND",
+            )
+        if not _has_profile_samples(profile_id, db):
+            return (
+                False,
+                f"Profile has no reference samples: {profile.name}",
+                "PROFILE_SAMPLE_MISSING",
+            )
+
+    return True, None, None
 
 
 def _get_stories_output_dir() -> Path:
@@ -857,6 +968,37 @@ async def render_studio_draft_final(
             for name, profile_id in seen.items()
         ]
 
+    preflight_ok, preflight_message, preflight_code = _run_studio_render_preflight(
+        draft=draft,
+        lines=lines,
+        character_mappings=character_mappings,
+        db=db,
+    )
+    if not preflight_ok:
+        failed_job = _create_failed_preflight_job(
+            story_id=draft.story_id,
+            total_lines=len(lines),
+            message=preflight_message or "Story render preflight failed",
+            code=preflight_code or "STORY_RENDER_PREFLIGHT_FAILED",
+            db=db,
+        )
+        get_task_manager().complete_story_render(
+            failed_job.id,
+            status="failed",
+            error=failed_job.error_summary,
+            error_code=failed_job.failure_code,
+        )
+        draft.status = "render_failed"
+        draft.updated_at = datetime.utcnow()
+        db.commit()
+        return StudioRenderFinalResponse(
+            draft_id=draft.id,
+            job_id=failed_job.id,
+            story_id=failed_job.story_id,
+            status=failed_job.status,
+            total_lines=failed_job.total_lines,
+        )
+
     line_specs: List[StoryLineSpec] = []
     for line in lines:
         line_specs.append(
@@ -878,7 +1020,7 @@ async def render_studio_draft_final(
         model_size=draft.model_size,
         language=draft.language,
         gap_ms=draft.gap_ms,
-        continue_on_error=bool(draft.continue_on_error),
+        continue_on_error=False,
         replace_existing_items=True,
         character_mappings=character_mappings,
         lines=line_specs,

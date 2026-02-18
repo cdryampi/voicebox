@@ -3,6 +3,7 @@ import { useServerStore } from '@/stores/serverStore';
 import type {
   ActiveTasksResponse,
   ActiveTasksSummaryResponse,
+  TaskEventsResponse,
   CapabilitiesResponse,
   GenerationRequest,
   GenerationResponse,
@@ -631,18 +632,10 @@ class ApiClient {
   }
 
   async triggerModelDownload(modelName: string): Promise<{ message: string }> {
-    console.log(
-      '[API] triggerModelDownload called for:',
-      modelName,
-      'at',
-      new Date().toISOString(),
-    );
-    const result = await this.request<{ message: string }>('/models/download', {
+    return this.request<{ message: string }>('/models/download', {
       method: 'POST',
       body: JSON.stringify({ model_name: modelName } as ModelDownloadRequest),
     });
-    console.log('[API] triggerModelDownload response:', result);
-    return result;
   }
 
   async deleteModel(modelName: string): Promise<{ message: string }> {
@@ -658,6 +651,14 @@ class ApiClient {
 
   async getTasksSummary(): Promise<ActiveTasksSummaryResponse> {
     return this.request<ActiveTasksSummaryResponse>('/tasks/summary');
+  }
+
+  async getTaskEvents(query?: { limit?: number; since_id?: number }): Promise<TaskEventsResponse> {
+    const params = new URLSearchParams();
+    if (query?.limit) params.append('limit', query.limit.toString());
+    if (typeof query?.since_id === 'number') params.append('since_id', query.since_id.toString());
+    const qs = params.toString();
+    return this.request<TaskEventsResponse>(qs ? `/tasks/events?${qs}` : '/tasks/events');
   }
 
   // Audio Channels
