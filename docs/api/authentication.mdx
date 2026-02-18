@@ -3,53 +3,54 @@ title: "Authentication"
 description: "API authentication and security"
 ---
 
-## Current Status
+## API Key Authentication
 
-<Warning>
-  Authentication is not currently implemented in Voicebox. The API is intended for local use only.
-</Warning>
+Voicebox supports optional API key authentication for remote deployments.
+
+Set `VOICEBOX_API_KEY` in the backend environment and send:
+
+```http
+Authorization: Bearer <VOICEBOX_API_KEY>
+```
+
+If `VOICEBOX_API_KEY` is not configured, the backend remains open for local-only workflows.
+
+## Media & SSE Access
+
+Some clients (for example `<audio>` tags or `EventSource`) cannot always attach custom headers.
+For these **GET** endpoints, Voicebox also accepts:
+
+```text
+?access_token=<VOICEBOX_API_KEY>
+```
+
+Examples:
+- `/audio/{generation_id}?access_token=...`
+- `/profiles/{profile_id}/avatar?access_token=...`
+- `/models/progress/{model_name}?access_token=...`
+
+For non-GET endpoints, use `Authorization: Bearer ...`.
 
 ## Local Usage
 
-For local development and usage:
-- API runs on `localhost:17493`
-- No authentication required
-- Access restricted to local machine
-
-## Future Implementation
-
-Authentication will be added in a future release for:
-- Remote deployments
-- Multi-user access
-- Production environments
-
-Planned authentication methods:
-- API keys
-- OAuth 2.0
-- JWT tokens
+For local development:
+- API runs on `http://127.0.0.1:17493`
+- Leave `VOICEBOX_API_KEY` unset
+- Keep server private to your machine/network
 
 ## Security Best Practices
 
-Until authentication is implemented:
-
 <CardGroup cols={2}>
-  <Card title="Use VPN" icon="shield">
-    Use WireGuard or Tailscale for remote access
+  <Card title="Use API Key" icon="key">
+    Always set `VOICEBOX_API_KEY` for public or tunneled deployments
   </Card>
-  <Card title="Reverse Proxy" icon="server">
-    Run behind nginx with basic auth
+  <Card title="Rotate Keys" icon="rotate-cw">
+    Change API keys regularly for shared demos/environments
   </Card>
-  <Card title="Firewall" icon="fire">
-    Restrict access to trusted IPs only
+  <Card title="Restrict Exposure" icon="shield">
+    Prefer VPN/Tailscale over open internet exposure
   </Card>
-  <Card title="Local Only" icon="laptop">
-    Don't expose to public internet
+  <Card title="Scoped Sessions" icon="clock">
+    Treat Colab/ngrok URLs and tokens as temporary
   </Card>
 </CardGroup>
-
-## Coming Soon
-
-- API key management
-- User accounts
-- Rate limiting
-- Access control

@@ -21,6 +21,7 @@ import { usePlatform } from '@/platform/PlatformContext';
 
 const connectionSchema = z.object({
   serverUrl: z.string().url('Please enter a valid URL'),
+  apiKey: z.string().optional(),
 });
 
 type ConnectionFormValues = z.infer<typeof connectionSchema>;
@@ -29,6 +30,8 @@ export function ConnectionForm() {
   const platform = usePlatform();
   const serverUrl = useServerStore((state) => state.serverUrl);
   const setServerUrl = useServerStore((state) => state.setServerUrl);
+  const apiKey = useServerStore((state) => state.apiKey);
+  const setApiKey = useServerStore((state) => state.setApiKey);
   const keepServerRunningOnClose = useServerStore((state) => state.keepServerRunningOnClose);
   const setKeepServerRunningOnClose = useServerStore((state) => state.setKeepServerRunningOnClose);
   const { toast } = useToast();
@@ -37,18 +40,20 @@ export function ConnectionForm() {
     resolver: zodResolver(connectionSchema),
     defaultValues: {
       serverUrl: serverUrl,
+      apiKey: apiKey,
     },
   });
 
-  // Sync form with store when serverUrl changes externally
+  // Sync form with store when settings change externally
   useEffect(() => {
-    form.reset({ serverUrl });
-  }, [serverUrl, form]);
+    form.reset({ serverUrl, apiKey });
+  }, [serverUrl, apiKey, form]);
 
   const { isDirty } = form.formState;
 
   function onSubmit(data: ConnectionFormValues) {
     setServerUrl(data.serverUrl);
+    setApiKey((data.apiKey || '').trim());
     form.reset(data); // Reset form state after successful submission
     toast({
       title: 'Server URL updated',
@@ -74,6 +79,23 @@ export function ConnectionForm() {
                     <Input placeholder="http://127.0.0.1:17493" {...field} />
                   </FormControl>
                   <FormDescription>Enter the URL of your voicebox backend server</FormDescription>
+                  <FormMessage />
+                </FormItem>
+              )}
+            />
+
+            <FormField
+              control={form.control}
+              name="apiKey"
+              render={({ field }) => (
+                <FormItem>
+                  <FormLabel>API Key (optional)</FormLabel>
+                  <FormControl>
+                    <Input placeholder="VOICEBOX_API_KEY" autoComplete="off" {...field} />
+                  </FormControl>
+                  <FormDescription>
+                    Required for remote backends protected with `VOICEBOX_API_KEY`.
+                  </FormDescription>
                   <FormMessage />
                 </FormItem>
               )}

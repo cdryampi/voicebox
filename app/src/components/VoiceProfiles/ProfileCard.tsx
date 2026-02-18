@@ -15,7 +15,7 @@ import {
 import type { VoiceProfileResponse } from '@/lib/api/types';
 import { useDeleteProfile, useExportProfile } from '@/lib/hooks/useProfiles';
 import { cn } from '@/lib/utils/cn';
-import { useServerStore } from '@/stores/serverStore';
+import { apiClient } from '@/lib/api/client';
 import { useUIStore } from '@/stores/uiStore';
 
 interface ProfileCardProps {
@@ -31,11 +31,10 @@ export function ProfileCard({ profile }: ProfileCardProps) {
   const setProfileDialogOpen = useUIStore((state) => state.setProfileDialogOpen);
   const selectedProfileId = useUIStore((state) => state.selectedProfileId);
   const setSelectedProfileId = useUIStore((state) => state.setSelectedProfileId);
-  const serverUrl = useServerStore((state) => state.serverUrl);
 
   const isSelected = selectedProfileId === profile.id;
 
-  const avatarUrl = profile.avatar_path ? `${serverUrl}/profiles/${profile.id}/avatar` : null;
+  const avatarUrl = profile.avatar_path ? apiClient.getProfileAvatarUrl(profile.id) : null;
 
   const handleSelect = () => {
     setSelectedProfileId(isSelected ? null : profile.id);

@@ -75,8 +75,12 @@ In Remote Mode, the Voicebox desktop app (running on your local machine) communi
     Replace `<server-ip>` with your server's IP address
   </Step>
 
+  <Step title="Set API Key (if enabled)">
+    If backend uses `VOICEBOX_API_KEY`, paste the same value in the **API Key** field.
+  </Step>
+
   <Step title="Test Connection">
-    Click **Test Connection** to verify
+    Save settings and call `/health` from the app (or run any quick generation) to verify.
   </Step>
 </Steps>
 
@@ -106,15 +110,25 @@ In Remote Mode, the Voicebox desktop app (running on your local machine) communi
 # Expose port 17493
 ```
 
+### Google Colab T4 (quick path)
+
+Use the notebook at `docs/colab/voicebox_t4_deploy.ipynb` to:
+
+- start backend with `VOICEBOX_COLAB_PROFILE=true`
+- set `VOICEBOX_API_KEY` for minimal protection
+- persist data in Google Drive via `VOICEBOX_DATA_DIR`
+- expose temporary public URL through `pyngrok`
+
 ## Security Considerations
 
 <Warning>
-  The API currently has no authentication. Only use on trusted networks or with a VPN.
+  For public/tunneled deployments, set `VOICEBOX_API_KEY` and configure the app with the same key.
 </Warning>
 
 **Best Practices:**
+- Enable API key auth: `VOICEBOX_API_KEY=<your-secret>`
 - Use a VPN (WireGuard, Tailscale) instead of exposing to the internet
-- Run behind a reverse proxy with authentication (nginx + basic auth)
+- Use short-lived tunnel sessions for demos
 - Use HTTPS with SSL certificates
 - Firewall rules to limit access to specific IPs
 

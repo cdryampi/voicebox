@@ -4,9 +4,9 @@ FastAPI application for voicebox backend.
 Handles voice cloning, generation history, and server mode.
 """
 
-from fastapi import FastAPI, Depends, UploadFile, File, Form, HTTPException
+from fastapi import FastAPI, Depends, UploadFile, File, Form, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse, StreamingResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy.orm import Session
 from typing import List, Optional
@@ -19,16 +19,23 @@ import tempfile
 import io
 from pathlib import Path
 import uuid
-import asyncio
 import signal
 import os
 
-from . import database, models, profiles, history, tts, transcribe, config, export_import, channels, stories, __version__
+from . import database, models, profiles, history, tts, transcribe, config, export_import, channels, stories, studio_drafts, __version__
 from .database import get_db, Generation as DBGeneration, VoiceProfile as DBVoiceProfile
 from .utils.progress import get_progress_manager
 from .utils.tasks import get_task_manager
 from .utils.cache import clear_voice_prompt_cache
+from .utils.groq import list_available_groq_models
 from .platform_detect import get_backend_type
+from .settings import load_settings
+from .auth import is_request_authorized
+
+SETTINGS = load_settings()
+
+if SETTINGS.data_dir:
+    config.set_data_dir(SETTINGS.data_dir)
 
 app = FastAPI(
     title="voicebox API",
@@ -39,11 +46,28 @@ app = FastAPI(
 # CORS middleware
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Configure appropriately for production
+    allow_origins=SETTINGS.allowed_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+PUBLIC_PATHS = {"/", "/docs", "/openapi.json", "/redoc"}
+
+
+@app.middleware("http")
+async def api_key_middleware(request: Request, call_next):
+    if request.method != "OPTIONS" and request.url.path not in PUBLIC_PATHS:
+        authorized = is_request_authorized(
+            SETTINGS,
+            request.headers.get("Authorization"),
+            query_token=request.query_params.get("access_token"),
+            method=request.method,
+        )
+        if not authorized:
+            return JSONResponse(status_code=401, content={"detail": "Unauthorized"})
+    return await call_next(request)
 
 
 # ============================================
@@ -89,7 +113,7 @@ async def health():
         gpu_type = "MPS (Apple Silicon)"
     elif backend_type == "mlx":
         gpu_type = "Metal (Apple Silicon via MLX)"
-
+    
     vram_used = None
     if has_cuda:
         vram_used = torch.cuda.memory_allocated() / 1024 / 1024  # MB
@@ -155,6 +179,45 @@ async def health():
         gpu_type=gpu_type,
         vram_used_mb=vram_used,
         backend_type=backend_type,
+    )
+
+
+@app.get("/runtime")
+async def runtime_info():
+    """Runtime diagnostics useful for remote deployment debugging."""
+    backend_type = get_backend_type()
+    tts_model = tts.get_tts_model()
+
+    runtime = {
+        "backend_type": backend_type,
+        "host": SETTINGS.host,
+        "port": SETTINGS.port,
+        "colab_profile": SETTINGS.colab_profile,
+        "default_model_size": SETTINGS.default_model_size,
+        "torch_cuda_available": torch.cuda.is_available(),
+        "torch_cuda_device": torch.cuda.get_device_name(0) if torch.cuda.is_available() else None,
+        "torch_mps_available": hasattr(torch.backends, "mps") and torch.backends.mps.is_available(),
+        "tts_loaded": tts_model.is_loaded(),
+        "tts_model_size": getattr(tts_model, "_current_model_size", None),
+        "tts_device": getattr(tts_model, "device", None),
+        "tts_torch_dtype": str(getattr(tts_model, "torch_dtype", None)) if hasattr(tts_model, "torch_dtype") else None,
+        "data_dir": str(config.get_data_dir()),
+    }
+
+    if torch.cuda.is_available():
+        runtime["vram_allocated_mb"] = torch.cuda.memory_allocated() / 1024 / 1024
+
+    return runtime
+
+
+@app.get("/llm/groq/models", response_model=models.GroqModelsResponse)
+async def list_groq_models():
+    """List selectable Groq models for story composition."""
+    dynamic_models = list_available_groq_models(SETTINGS)
+    return models.GroqModelsResponse(
+        enabled=bool(SETTINGS.groq_api_key),
+        default_model=SETTINGS.groq_model,
+        models=dynamic_models,
     )
 
 
@@ -551,7 +614,7 @@ async def generate_speech(
         # Generate audio
         tts_model = tts.get_tts_model()
         # Load the requested model size if different from current (async to not block)
-        model_size = data.model_size or "1.7B"
+        model_size = data.model_size or SETTINGS.default_model_size
 
         # Check if model needs to be downloaded first
         model_path = tts_model._get_model_path(model_size)
@@ -882,6 +945,152 @@ async def create_story(
         raise HTTPException(status_code=400, detail=str(e))
 
 
+@app.post("/stories/render-from-history", response_model=models.StoryRenderJobResponse)
+async def render_story_from_history(
+    data: models.StoryRenderFromHistoryRequest,
+    db: Session = Depends(get_db),
+):
+    """Create a background story render job from existing history generations."""
+    try:
+        return await stories.create_story_render_from_history(data, db)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/stories/compose-roleplay", response_model=models.StoryRenderJobResponse)
+async def compose_story_roleplay(
+    data: models.StoryComposeWithGroqRequest,
+    db: Session = Depends(get_db),
+):
+    """Use Groq to compose novel/roleplay lines and render them to audio."""
+    try:
+        return await stories.compose_story_with_groq(data, db)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/studio/drafts", response_model=models.StudioDraftResponse)
+async def create_studio_draft(
+    data: models.StudioDraftCreateRequest,
+    db: Session = Depends(get_db),
+):
+    """Create a Studio draft from prompt and character mappings."""
+    try:
+        return await studio_drafts.create_studio_draft(data, db)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/studio/drafts", response_model=List[models.StudioDraftListItem])
+async def list_studio_drafts(
+    story_id: Optional[str] = None,
+    db: Session = Depends(get_db),
+):
+    """List Studio drafts, optionally filtered by story."""
+    return await studio_drafts.list_studio_drafts(db, story_id=story_id)
+
+
+@app.get("/studio/drafts/{draft_id}", response_model=models.StudioDraftDetailResponse)
+async def get_studio_draft(
+    draft_id: str,
+    db: Session = Depends(get_db),
+):
+    """Get Studio draft detail including cards."""
+    draft = await studio_drafts.get_studio_draft(draft_id, db)
+    if not draft:
+        raise HTTPException(status_code=404, detail="Studio draft not found")
+    return draft
+
+
+@app.put("/studio/drafts/{draft_id}/lines", response_model=models.StudioDraftDetailResponse)
+async def update_studio_draft_lines(
+    draft_id: str,
+    data: models.StudioDraftLinesUpdateRequest,
+    db: Session = Depends(get_db),
+):
+    """Update Studio draft cards (text, character, emotion, intensity, order)."""
+    try:
+        updated = await studio_drafts.update_studio_draft_lines(draft_id, data, db)
+        if not updated:
+            raise HTTPException(status_code=404, detail="Studio draft not found")
+        return updated
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/studio/drafts/{draft_id}/lines/{line_id}/preview", response_model=models.StudioPreviewResponse)
+async def generate_studio_preview(
+    draft_id: str,
+    line_id: str,
+    db: Session = Depends(get_db),
+):
+    """Generate or regenerate a short preview for one Studio card."""
+    try:
+        return await studio_drafts.generate_studio_line_preview(draft_id, line_id, db)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/studio/drafts/{draft_id}/lines/{line_id}/preview/audio")
+async def get_studio_preview_audio(
+    draft_id: str,
+    line_id: str,
+    db: Session = Depends(get_db),
+):
+    """Serve Studio card preview audio file."""
+    audio_path = await studio_drafts.get_studio_line_preview_audio_path(draft_id, line_id, db)
+    if not audio_path:
+        raise HTTPException(status_code=404, detail="Preview audio not found")
+    return FileResponse(
+        audio_path,
+        media_type="audio/wav",
+        filename=f"studio_preview_{line_id}.wav",
+    )
+
+
+@app.post("/studio/drafts/{draft_id}/render-final", response_model=models.StudioRenderFinalResponse)
+async def render_studio_draft_final(
+    draft_id: str,
+    db: Session = Depends(get_db),
+):
+    """Launch final async story render from Studio draft cards."""
+    try:
+        result = await studio_drafts.render_studio_draft_final(draft_id, db)
+        if not result:
+            raise HTTPException(status_code=404, detail="Studio draft not found")
+        return result
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/stories/jobs/{job_id}", response_model=models.StoryRenderStatusResponse)
+async def get_story_render_job_status(
+    job_id: str,
+    db: Session = Depends(get_db),
+):
+    """Get render job status and per-line progress."""
+    status_data = await stories.get_story_render_status(job_id, db)
+    if not status_data:
+        raise HTTPException(status_code=404, detail="Story render job not found")
+    return status_data
+
+
 @app.get("/stories/{story_id}", response_model=models.StoryDetailResponse)
 async def get_story(
     story_id: str,
@@ -1061,6 +1270,31 @@ async def export_story_audio(
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/stories/{story_id}/audio")
+async def get_story_mixed_audio(
+    story_id: str,
+    db: Session = Depends(get_db),
+):
+    """Serve persisted story mixed audio file (from render job output)."""
+    story = db.query(database.Story).filter_by(id=story_id).first()
+    if not story:
+        raise HTTPException(status_code=404, detail="Story not found")
+
+    audio_path = await stories.get_story_audio_path(story_id, db)
+    if not audio_path:
+        raise HTTPException(status_code=404, detail="No persisted mixed audio found for this story")
+
+    safe_name = "".join(c for c in story.name if c.isalnum() or c in (" ", "-", "_")).strip()
+    if not safe_name:
+        safe_name = "story"
+
+    return FileResponse(
+        audio_path,
+        media_type="audio/wav",
+        filename=f"{safe_name}.wav",
+    )
 
 
 # ============================================
@@ -1627,10 +1861,22 @@ async def get_active_tasks():
             text_preview=gen_task.text_preview,
             started_at=gen_task.started_at,
         ))
+
+    active_story_renders = []
+    for render_task in task_manager.get_active_story_renders():
+        active_story_renders.append(models.ActiveStoryRenderTask(
+            job_id=render_task.job_id,
+            story_id=render_task.story_id,
+            status=render_task.status,
+            total_lines=render_task.total_lines,
+            processed_lines=render_task.processed_lines,
+            started_at=render_task.started_at,
+        ))
     
     return models.ActiveTasksResponse(
         downloads=active_downloads,
         generations=active_generations,
+        story_renders=active_story_renders,
     )
 
 
@@ -1654,6 +1900,8 @@ def _get_gpu_status() -> str:
 async def startup_event():
     """Run on application startup."""
     print("voicebox API starting up...")
+    print(f"Colab profile: {SETTINGS.colab_profile}")
+    print(f"API key protection enabled: {bool(SETTINGS.api_key)}")
     database.init_db()
     print(f"Database initialized at {database._db_path}")
     backend_type = get_backend_type()
@@ -1697,19 +1945,19 @@ if __name__ == "__main__":
     parser.add_argument(
         "--host",
         type=str,
-        default="127.0.0.1",
+        default=SETTINGS.host,
         help="Host to bind to (use 0.0.0.0 for remote access)",
     )
     parser.add_argument(
         "--port",
         type=int,
-        default=8000,
+        default=SETTINGS.port,
         help="Port to bind to",
     )
     parser.add_argument(
         "--data-dir",
         type=str,
-        default=None,
+        default=str(SETTINGS.data_dir) if SETTINGS.data_dir else None,
         help="Data directory for database, profiles, and generated audio",
     )
     args = parser.parse_args()

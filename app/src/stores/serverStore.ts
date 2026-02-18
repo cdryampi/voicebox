@@ -4,6 +4,8 @@ import { persist } from 'zustand/middleware';
 interface ServerStore {
   serverUrl: string;
   setServerUrl: (url: string) => void;
+  apiKey: string;
+  setApiKey: (apiKey: string) => void;
 
   isConnected: boolean;
   setIsConnected: (connected: boolean) => void;
@@ -20,6 +22,8 @@ export const useServerStore = create<ServerStore>()(
     (set) => ({
       serverUrl: 'http://127.0.0.1:17493',
       setServerUrl: (url) => set({ serverUrl: url }),
+      apiKey: '',
+      setApiKey: (apiKey) => set({ apiKey }),
 
       isConnected: false,
       setIsConnected: (connected) => set({ isConnected: connected }),

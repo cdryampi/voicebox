@@ -45,7 +45,7 @@ import { useSystemAudioCapture } from '@/lib/hooks/useSystemAudioCapture';
 import { useTranscription } from '@/lib/hooks/useTranscription';
 import { formatAudioDuration, getAudioDuration } from '@/lib/utils/audio';
 import { usePlatform } from '@/platform/PlatformContext';
-import { useServerStore } from '@/stores/serverStore';
+import { apiClient } from '@/lib/api/client';
 import { type ProfileFormDraft, useUIStore } from '@/stores/uiStore';
 import { AudioSampleRecording } from './AudioSampleRecording';
 import { AudioSampleSystem } from './AudioSampleSystem';
@@ -124,7 +124,6 @@ export function ProfileForm() {
   const avatarInputRef = useRef<HTMLInputElement>(null);
   const { isPlaying, playPause, cleanup: cleanupAudio } = useAudioPlayer();
   const isCreating = !editingProfileId;
-  const serverUrl = useServerStore((state) => state.serverUrl);
 
   const form = useForm<ProfileFormValues>({
     resolver: zodResolver(profileSchema),
@@ -263,11 +262,11 @@ export function ProfileForm() {
       setAvatarPreview(url);
       return () => URL.revokeObjectURL(url);
     } else if (editingProfile?.avatar_path) {
-      setAvatarPreview(`${serverUrl}/profiles/${editingProfile.id}/avatar`);
+      setAvatarPreview(apiClient.getProfileAvatarUrl(editingProfile.id));
     } else {
       setAvatarPreview(null);
     }
-  }, [selectedAvatarFile, editingProfile, serverUrl]);
+  }, [selectedAvatarFile, editingProfile]);
 
   // Restore form state from draft or editing profile
   useEffect(() => {

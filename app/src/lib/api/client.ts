@@ -24,6 +24,16 @@ import type {
   StoryItemMove,
   StoryItemTrim,
   StoryItemSplit,
+  StoryComposeWithGroqRequest,
+  StoryRenderJobResponse,
+  GroqModelsResponse,
+  StudioDraftCreateRequest,
+  StudioDraftResponse,
+  StudioDraftListItem,
+  StudioDraftDetailResponse,
+  StudioDraftLinesUpdateRequest,
+  StudioPreviewResponse,
+  StudioRenderFinalResponse,
 } from './types';
 
 class ApiClient {
@@ -32,12 +42,44 @@ class ApiClient {
     return serverUrl;
   }
 
+  private getApiKey(): string {
+    return useServerStore.getState().apiKey?.trim() || '';
+  }
+
+  private getAuthHeaders(): Record<string, string> {
+    const token = this.getApiKey();
+    if (!token) return {};
+    return {
+      Authorization: `Bearer ${token}`,
+    };
+  }
+
+  private buildAuthedUrl(endpoint: string): string {
+    const url = new URL(`${this.getBaseUrl()}${endpoint}`);
+    const token = this.getApiKey();
+    if (token) {
+      url.searchParams.set('access_token', token);
+    }
+    return url.toString();
+  }
+
+  private async fetchWithAuth(url: string, options?: RequestInit): Promise<Response> {
+    return fetch(url, {
+      ...options,
+      headers: {
+        ...this.getAuthHeaders(),
+        ...options?.headers,
+      },
+    });
+  }
+
   private async request<T>(endpoint: string, options?: RequestInit): Promise<T> {
     const url = `${this.getBaseUrl()}${endpoint}`;
     const response = await fetch(url, {
       ...options,
       headers: {
         'Content-Type': 'application/json',
+        ...this.getAuthHeaders(),
         ...options?.headers,
       },
     });
@@ -89,14 +131,14 @@ class ApiClient {
   async addProfileSample(
     profileId: string,
     file: File,
-    referenceText: string,
+  referenceText: string,
   ): Promise<ProfileSampleResponse> {
     const url = `${this.getBaseUrl()}/profiles/${profileId}/samples`;
     const formData = new FormData();
     formData.append('file', file);
     formData.append('reference_text', referenceText);
 
-    const response = await fetch(url, {
+    const response = await this.fetchWithAuth(url, {
       method: 'POST',
       body: formData,
     });
@@ -133,7 +175,7 @@ class ApiClient {
 
   async exportProfile(profileId: string): Promise<Blob> {
     const url = `${this.getBaseUrl()}/profiles/${profileId}/export`;
-    const response = await fetch(url);
+    const response = await this.fetchWithAuth(url);
 
     if (!response.ok) {
       const error = await response.json().catch(() => ({
@@ -150,7 +192,7 @@ class ApiClient {
     const formData = new FormData();
     formData.append('file', file);
 
-    const response = await fetch(url, {
+    const response = await this.fetchWithAuth(url, {
       method: 'POST',
       body: formData,
     });
@@ -170,7 +212,7 @@ class ApiClient {
     const formData = new FormData();
     formData.append('file', file);
 
-    const response = await fetch(url, {
+    const response = await this.fetchWithAuth(url, {
       method: 'POST',
       body: formData,
     });
@@ -225,7 +267,7 @@ class ApiClient {
 
   async exportGeneration(generationId: string): Promise<Blob> {
     const url = `${this.getBaseUrl()}/history/${generationId}/export`;
-    const response = await fetch(url);
+    const response = await this.fetchWithAuth(url);
 
     if (!response.ok) {
       const error = await response.json().catch(() => ({
@@ -239,7 +281,7 @@ class ApiClient {
 
   async exportGenerationAudio(generationId: string): Promise<Blob> {
     const url = `${this.getBaseUrl()}/history/${generationId}/export-audio`;
-    const response = await fetch(url);
+    const response = await this.fetchWithAuth(url);
 
     if (!response.ok) {
       const error = await response.json().catch(() => ({
@@ -256,7 +298,7 @@ class ApiClient {
     const formData = new FormData();
     formData.append('file', file);
 
-    const response = await fetch(url, {
+    const response = await this.fetchWithAuth(url, {
       method: 'POST',
       body: formData,
     });
@@ -273,11 +315,19 @@ class ApiClient {
 
   // Audio
   getAudioUrl(audioId: string): string {
-    return `${this.getBaseUrl()}/audio/${audioId}`;
+    return this.buildAuthedUrl(`/audio/${audioId}`);
   }
 
   getSampleUrl(sampleId: string): string {
-    return `${this.getBaseUrl()}/samples/${sampleId}`;
+    return this.buildAuthedUrl(`/samples/${sampleId}`);
+  }
+
+  getProfileAvatarUrl(profileId: string): string {
+    return this.buildAuthedUrl(`/profiles/${profileId}/avatar`);
+  }
+
+  getModelProgressSseUrl(modelName: string): string {
+    return this.buildAuthedUrl(`/models/progress/${modelName}`);
   }
 
   // Transcription
@@ -289,7 +339,7 @@ class ApiClient {
     }
 
     const url = `${this.getBaseUrl()}/transcribe`;
-    const response = await fetch(url, {
+    const response = await this.fetchWithAuth(url, {
       method: 'POST',
       body: formData,
     });
@@ -497,7 +547,7 @@ class ApiClient {
 
   async exportStoryAudio(storyId: string): Promise<Blob> {
     const url = `${this.getBaseUrl()}/stories/${storyId}/export-audio`;
-    const response = await fetch(url);
+    const response = await this.fetchWithAuth(url);
 
     if (!response.ok) {
       const error = await response.json().catch(() => ({
@@ -507,6 +557,62 @@ class ApiClient {
     }
 
     return response.blob();
+  }
+
+  async listGroqModels(): Promise<GroqModelsResponse> {
+    return this.request<GroqModelsResponse>('/llm/groq/models');
+  }
+
+  async composeStoryRoleplay(data: StoryComposeWithGroqRequest): Promise<StoryRenderJobResponse> {
+    return this.request<StoryRenderJobResponse>('/stories/compose-roleplay', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  }
+
+  async createStudioDraft(data: StudioDraftCreateRequest): Promise<StudioDraftResponse> {
+    return this.request<StudioDraftResponse>('/studio/drafts', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  }
+
+  async listStudioDrafts(storyId?: string): Promise<StudioDraftListItem[]> {
+    const query = storyId ? `?story_id=${encodeURIComponent(storyId)}` : '';
+    return this.request<StudioDraftListItem[]>(`/studio/drafts${query}`);
+  }
+
+  async getStudioDraft(draftId: string): Promise<StudioDraftDetailResponse> {
+    return this.request<StudioDraftDetailResponse>(`/studio/drafts/${draftId}`);
+  }
+
+  async updateStudioDraftLines(
+    draftId: string,
+    data: StudioDraftLinesUpdateRequest,
+  ): Promise<StudioDraftDetailResponse> {
+    return this.request<StudioDraftDetailResponse>(`/studio/drafts/${draftId}/lines`, {
+      method: 'PUT',
+      body: JSON.stringify(data),
+    });
+  }
+
+  async generateStudioLinePreview(
+    draftId: string,
+    lineId: string,
+  ): Promise<StudioPreviewResponse> {
+    return this.request<StudioPreviewResponse>(`/studio/drafts/${draftId}/lines/${lineId}/preview`, {
+      method: 'POST',
+    });
+  }
+
+  getStudioLinePreviewUrl(draftId: string, lineId: string): string {
+    return this.buildAuthedUrl(`/studio/drafts/${draftId}/lines/${lineId}/preview/audio`);
+  }
+
+  async renderStudioDraftFinal(draftId: string): Promise<StudioRenderFinalResponse> {
+    return this.request<StudioRenderFinalResponse>(`/studio/drafts/${draftId}/render-final`, {
+      method: 'POST',
+    });
   }
 }
 

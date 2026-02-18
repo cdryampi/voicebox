@@ -10,10 +10,10 @@ import {
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
 import { Textarea } from '@/components/ui/textarea';
+import { apiClient } from '@/lib/api/client';
 import type { StoryItemDetail } from '@/lib/api/types';
 import { cn } from '@/lib/utils/cn';
 import { useStoryStore } from '@/stores/storyStore';
-import { useServerStore } from '@/stores/serverStore';
 
 interface StoryChatItemProps {
   item: StoryItemDetail;
@@ -35,10 +35,9 @@ export function StoryChatItem({
   isDragging,
 }: StoryChatItemProps) {
   const seek = useStoryStore((state) => state.seek);
-  const serverUrl = useServerStore((state) => state.serverUrl);
   const [avatarError, setAvatarError] = useState(false);
 
-  const avatarUrl = `${serverUrl}/profiles/${item.profile_id}/avatar`;
+  const avatarUrl = apiClient.getProfileAvatarUrl(item.profile_id);
 
   // Check if this item is currently playing based on timecode
   const itemStartMs = item.start_time_ms;
