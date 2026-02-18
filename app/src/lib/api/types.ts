@@ -51,17 +51,49 @@ export interface GenerationResponse {
 export interface HistoryQuery {
   profile_id?: string;
   search?: string;
+  origin?: 'all' | 'orphan' | 'linked';
+  story_id?: string;
   limit?: number;
   offset?: number;
 }
 
+export interface HistoryStoryLink {
+  story_id: string;
+  story_name: string;
+  item_count: number;
+}
+
 export interface HistoryResponse extends GenerationResponse {
   profile_name: string;
+  is_orphan: boolean;
+  linked_story_count: number;
+  linked_item_count: number;
+  story_links: HistoryStoryLink[];
 }
 
 export interface HistoryListResponse {
   items: HistoryResponse[];
   total: number;
+}
+
+export interface HistoryBulkDeleteRequest {
+  scope: 'all' | 'orphans' | 'story';
+  story_id?: string;
+  detach_story_items?: boolean;
+  dry_run?: boolean;
+}
+
+export interface HistoryBulkDeleteResponse {
+  scope: 'all' | 'orphans' | 'story';
+  story_id?: string;
+  dry_run: boolean;
+  requested_generations: number;
+  deleted_generations: number;
+  deleted_audio_files: number;
+  protected_generations: number;
+  deleted_story_items: number;
+  retained_shared_generations: number;
+  errors: string[];
 }
 
 export interface TranscriptionRequest {
@@ -101,6 +133,29 @@ export interface RuntimeInfoResponse {
   tts_torch_dtype?: string | null;
   data_dir: string;
   vram_allocated_mb?: number;
+}
+
+export type ServerLogLevel = 'DEBUG' | 'INFO' | 'WARNING' | 'ERROR' | 'CRITICAL';
+
+export interface ServerLogEntry {
+  id: number;
+  ts: string;
+  level: ServerLogLevel;
+  logger: string;
+  message: string;
+  tags: string[];
+}
+
+export interface ServerLogsResponse {
+  items: ServerLogEntry[];
+  total_buffered: number;
+  dropped_count: number;
+}
+
+export interface ServerLogsQuery {
+  limit?: number;
+  level?: ServerLogLevel;
+  contains?: string;
 }
 
 export interface ModelProgress {

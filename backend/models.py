@@ -79,8 +79,17 @@ class HistoryQuery(BaseModel):
     """Query model for generation history."""
     profile_id: Optional[str] = None
     search: Optional[str] = None
+    origin: Literal["all", "orphan", "linked"] = "all"
+    story_id: Optional[str] = None
     limit: int = Field(default=50, ge=1, le=1000)
     offset: int = Field(default=0, ge=0)
+
+
+class HistoryStoryLink(BaseModel):
+    """Story linkage summary for one generation."""
+    story_id: str
+    story_name: str
+    item_count: int = 0
 
 
 class HistoryResponse(BaseModel):
@@ -95,6 +104,10 @@ class HistoryResponse(BaseModel):
     seed: Optional[int]
     instruct: Optional[str]
     created_at: datetime
+    is_orphan: bool = True
+    linked_story_count: int = 0
+    linked_item_count: int = 0
+    story_links: List[HistoryStoryLink] = Field(default_factory=list)
 
     class Config:
         from_attributes = True
@@ -104,6 +117,28 @@ class HistoryListResponse(BaseModel):
     """Response model for history list."""
     items: List[HistoryResponse]
     total: int
+
+
+class HistoryBulkDeleteRequest(BaseModel):
+    """Bulk deletion scope for generation history."""
+    scope: Literal["all", "orphans", "story"]
+    story_id: Optional[str] = None
+    detach_story_items: bool = False
+    dry_run: bool = False
+
+
+class HistoryBulkDeleteResponse(BaseModel):
+    """Bulk deletion result summary for generation history."""
+    scope: Literal["all", "orphans", "story"]
+    story_id: Optional[str] = None
+    dry_run: bool = False
+    requested_generations: int = 0
+    deleted_generations: int = 0
+    deleted_audio_files: int = 0
+    protected_generations: int = 0
+    deleted_story_items: int = 0
+    retained_shared_generations: int = 0
+    errors: List[str] = Field(default_factory=list)
 
 
 class TranscriptionRequest(BaseModel):
@@ -174,6 +209,23 @@ class CapabilitiesResponse(BaseModel):
     model_progress_snapshot: bool = True
     query_token_get_auth: bool = True
     runtime_defaults: bool = True
+
+
+class ServerLogEntry(BaseModel):
+    """Single backend runtime log line."""
+    id: int
+    ts: datetime
+    level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
+    logger: str
+    message: str
+    tags: List[str] = Field(default_factory=list)
+
+
+class ServerLogsResponse(BaseModel):
+    """Runtime logs snapshot."""
+    items: List[ServerLogEntry]
+    total_buffered: int
+    dropped_count: int
 
 
 class ActiveDownloadTask(BaseModel):

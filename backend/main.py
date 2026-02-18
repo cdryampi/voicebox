@@ -9,7 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy.orm import Session
-from typing import List, Optional
+from typing import List, Optional, Literal
 from datetime import datetime
 import asyncio
 import uvicorn
@@ -17,6 +17,8 @@ import argparse
 import torch
 import tempfile
 import io
+import json
+import logging
 from pathlib import Path
 import uuid
 import signal
@@ -49,11 +51,13 @@ from .utils.progress import get_progress_manager
 from .utils.tasks import get_task_manager
 from .utils.cache import clear_voice_prompt_cache
 from .utils.groq import list_available_groq_models
+from .utils import runtime_logs
 from .platform_detect import get_backend_type
 from .settings import load_settings
 from .auth import is_request_authorized
 
 SETTINGS = load_settings()
+logger = logging.getLogger(__name__)
 
 if SETTINGS.data_dir:
     config.set_data_dir(SETTINGS.data_dir)
@@ -87,6 +91,18 @@ def _new_db_session() -> Session:
 def _get_runtime_model_defaults(db: Session) -> models.ModelDefaultsResponse:
     """Fetch persisted model defaults with env fallback."""
     return runtime_defaults.get_model_defaults(db, settings=SETTINGS)
+
+
+def _is_cuda_single_model_mode() -> bool:
+    """
+    In Colab CUDA deployments we keep only one heavy model loaded at once (TTS or Whisper)
+    to avoid VRAM pressure and unstable runtime behavior.
+    """
+    return bool(SETTINGS.colab_profile and torch.cuda.is_available())
+
+
+def _is_cuda_assert_error(exc: Exception) -> bool:
+    return "device-side assert" in str(exc).lower()
 
 
 @app.middleware("http")
@@ -247,6 +263,63 @@ async def runtime_info():
         runtime["vram_allocated_mb"] = torch.cuda.memory_allocated() / 1024 / 1024
 
     return runtime
+
+
+@app.get("/server/logs", response_model=models.ServerLogsResponse)
+async def get_server_logs(
+    limit: int = 200,
+    level: Optional[Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]] = None,
+    contains: Optional[str] = None,
+):
+    """Get a buffered runtime logs snapshot for operational diagnostics."""
+    manager = runtime_logs.get_runtime_log_manager()
+    snapshot = manager.snapshot(limit=limit, level=level, contains=contains)
+    return models.ServerLogsResponse(
+        items=[
+            models.ServerLogEntry(
+                id=entry.id,
+                ts=entry.ts,
+                level=entry.level,
+                logger=entry.logger,
+                message=entry.message,
+                tags=list(entry.tags),
+            )
+            for entry in snapshot.items
+        ],
+        total_buffered=snapshot.total_buffered,
+        dropped_count=snapshot.dropped_count,
+    )
+
+
+@app.get("/server/logs/stream")
+async def stream_server_logs(
+    level: Optional[Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]] = None,
+    contains: Optional[str] = None,
+):
+    """Stream runtime logs as SSE for live remote debugging."""
+    manager = runtime_logs.get_runtime_log_manager()
+
+    async def event_generator():
+        async for entry in manager.subscribe(level=level, contains=contains):
+            payload = models.ServerLogEntry(
+                id=entry.id,
+                ts=entry.ts,
+                level=entry.level,
+                logger=entry.logger,
+                message=entry.message,
+                tags=list(entry.tags),
+            ).model_dump(mode="json")
+            yield f"event: log\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 @app.get("/capabilities", response_model=models.CapabilitiesResponse)
@@ -643,7 +716,8 @@ async def generate_speech(
     """Generate speech from text using a voice profile."""
     task_manager = get_task_manager()
     generation_id = str(uuid.uuid4())
-    
+    started_generation_task = False
+
     try:
         # Start tracking generation
         task_manager.start_generation(
@@ -651,20 +725,30 @@ async def generate_speech(
             profile_id=data.profile_id,
             text=data.text,
         )
-        
+        started_generation_task = True
+
         # Get profile
         profile = await profiles.get_profile(data.profile_id, db)
         if not profile:
             raise HTTPException(status_code=404, detail="Profile not found")
-        
+
         # Create voice prompt from profile
         voice_prompt = await profiles.create_voice_prompt_for_profile(
             data.profile_id,
             db,
         )
-        
+
         # Generate audio
         tts_model = tts.get_tts_model()
+        whisper_model = transcribe.get_whisper_model()
+
+        if _is_cuda_single_model_mode() and whisper_model.is_loaded():
+            logger.warning(
+                "CUDA single-model mode: unloading Whisper before TTS generation request",
+                extra={"tags": ["models", "memory", "single_model_mode"]},
+            )
+            transcribe.unload_whisper_model()
+
         # Load the requested model size if different from current (async to not block)
         defaults = _get_runtime_model_defaults(db)
         model_size = data.model_size or defaults.default_tts_model_size
@@ -688,13 +772,14 @@ async def generate_speech(
                 task_manager.start_download(model_name)
                 asyncio.create_task(download_model_background())
 
-                # Return 202 Accepted with download info
+                # Return explicit retryable error so clients don't misinterpret this as a successful generation.
                 raise HTTPException(
-                    status_code=202,
+                    status_code=503,
                     detail={
                         "message": f"Model {model_size} is being downloaded. Please wait and try again.",
                         "model_name": model_name,
-                        "downloading": True
+                        "downloading": True,
+                        "error_code": "MODEL_DOWNLOADING",
                     }
                 )
 
@@ -728,17 +813,28 @@ async def generate_speech(
             instruct=data.instruct,
         )
         
-        # Mark generation as complete
-        task_manager.complete_generation(generation_id)
-        
         return generation
-        
+
+    except HTTPException:
+        raise
     except ValueError as e:
-        task_manager.complete_generation(generation_id)
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
-        task_manager.complete_generation(generation_id)
+        if _is_cuda_assert_error(e):
+            logger.error(
+                "MODEL_GENERATE_CUDA_ASSERT generation_id=%s profile_id=%s",
+                generation_id,
+                data.profile_id,
+                extra={"tags": ["generate", "cuda_assert"]},
+            )
+            raise HTTPException(
+                status_code=503,
+                detail="CUDA runtime entered invalid state; restart backend process in Colab and retry.",
+            ) from e
         raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        if started_generation_task:
+            task_manager.complete_generation(generation_id)
 
 
 # ============================================
@@ -749,6 +845,8 @@ async def generate_speech(
 async def list_history(
     profile_id: Optional[str] = None,
     search: Optional[str] = None,
+    origin: str = "all",
+    story_id: Optional[str] = None,
     limit: int = 50,
     offset: int = 0,
     db: Session = Depends(get_db),
@@ -758,6 +856,8 @@ async def list_history(
         query = models.HistoryQuery(
             profile_id=profile_id,
             search=search,
+            origin=origin,
+            story_id=story_id,
             limit=limit,
             offset=offset,
         )
@@ -805,44 +905,41 @@ async def get_generation(
     db: Session = Depends(get_db),
 ):
     """Get a generation by ID."""
-    # Get generation with profile name
-    result = db.query(
-        DBGeneration,
-        DBVoiceProfile.name.label('profile_name')
-    ).join(
-        DBVoiceProfile,
-        DBGeneration.profile_id == DBVoiceProfile.id
-    ).filter(
-        DBGeneration.id == generation_id
-    ).first()
-    
-    if not result:
+    generation = await history.get_history_generation(generation_id, db)
+    if not generation:
         raise HTTPException(status_code=404, detail="Generation not found")
-    
-    gen, profile_name = result
-    return models.HistoryResponse(
-        id=gen.id,
-        profile_id=gen.profile_id,
-        profile_name=profile_name,
-        text=gen.text,
-        language=gen.language,
-        audio_path=gen.audio_path,
-        duration=gen.duration,
-        seed=gen.seed,
-        instruct=gen.instruct,
-        created_at=gen.created_at,
-    )
+    return generation
+
+
+@app.post("/history/bulk-delete", response_model=models.HistoryBulkDeleteResponse)
+async def bulk_delete_history(
+    data: models.HistoryBulkDeleteRequest,
+    db: Session = Depends(get_db),
+):
+    """Bulk-delete generations using safe scope rules."""
+    try:
+        return await history.bulk_delete_generations(data, db)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.delete("/history/{generation_id}")
 async def delete_generation(
     generation_id: str,
+    force: bool = False,
     db: Session = Depends(get_db),
 ):
     """Delete a generation."""
-    success = await history.delete_generation(generation_id, db)
-    if not success:
+    result = await history.delete_generation(generation_id, db, force=force)
+    if result == "not_found":
         raise HTTPException(status_code=404, detail="Generation not found")
+    if result == "protected":
+        raise HTTPException(
+            status_code=409,
+            detail="Generation is linked to one or more story cards and is protected.",
+        )
     return {"message": "Generation deleted successfully"}
 
 
@@ -942,7 +1039,15 @@ async def transcribe_audio(
             raise HTTPException(status_code=400, detail="Invalid whisper model_size")
 
         whisper_model = transcribe.get_whisper_model()
+        tts_model = tts.get_tts_model()
         model_name = f"openai/whisper-{selected_model_size}"
+
+        if _is_cuda_single_model_mode() and tts_model.is_loaded():
+            logger.warning(
+                "CUDA single-model mode: unloading TTS before Whisper transcription request",
+                extra={"tags": ["models", "memory", "single_model_mode"]},
+            )
+            tts.unload_tts_model()
 
         # Check if model is cached
         from huggingface_hub import constants as hf_constants
@@ -960,11 +1065,12 @@ async def transcribe_audio(
             asyncio.create_task(download_whisper_background())
 
             raise HTTPException(
-                status_code=202,
+                status_code=503,
                 detail={
                     "message": f"Whisper model {selected_model_size} is being downloaded. Please wait and try again.",
                     "model_name": progress_model_name,
                     "downloading": True,
+                    "error_code": "MODEL_DOWNLOADING",
                 },
             )
 
@@ -977,6 +1083,16 @@ async def transcribe_audio(
     except HTTPException:
         raise
     except Exception as e:
+        if _is_cuda_assert_error(e):
+            logger.error(
+                "MODEL_TRANSCRIBE_CUDA_ASSERT model_size=%s",
+                selected_model_size if 'selected_model_size' in locals() else "unknown",
+                extra={"tags": ["transcribe", "cuda_assert"]},
+            )
+            raise HTTPException(
+                status_code=503,
+                detail="CUDA runtime entered invalid state; restart backend process in Colab and retry.",
+            ) from e
         raise HTTPException(status_code=500, detail=str(e))
     finally:
         Path(tmp_path).unlink(missing_ok=True)
@@ -1497,27 +1613,95 @@ async def get_runtime_models(db: Session = Depends(get_db)):
 async def activate_model(data: models.ModelDownloadRequest):
     """Load a downloaded model into memory and make it active for runtime."""
     model_name = data.model_name
+    warning_message: Optional[str] = None
     try:
+        if _is_cuda_single_model_mode():
+            if model_name.startswith("qwen-tts"):
+                whisper_model = transcribe.get_whisper_model()
+                if whisper_model.is_loaded():
+                    transcribe.unload_whisper_model()
+                    warning_message = (
+                        "Whisper model was unloaded to free GPU memory. "
+                        "In Colab CUDA mode, keep only one model loaded at a time."
+                    )
+                    logger.warning(
+                        "CUDA single-model mode: unloaded Whisper before activating %s",
+                        model_name,
+                        extra={"tags": ["models", "memory", "single_model_mode"]},
+                    )
+            elif model_name.startswith("whisper-"):
+                tts_model = tts.get_tts_model()
+                if tts_model.is_loaded():
+                    tts.unload_tts_model()
+                    warning_message = (
+                        "Qwen TTS model was unloaded to free GPU memory. "
+                        "In Colab CUDA mode, keep only one model loaded at a time."
+                    )
+                    logger.warning(
+                        "CUDA single-model mode: unloaded Qwen TTS before activating %s",
+                        model_name,
+                        extra={"tags": ["models", "memory", "single_model_mode"]},
+                    )
+
         if model_name == "qwen-tts-1.7B":
             await tts.get_tts_model().load_model_async("1.7B")
-            return {"message": "Model qwen-tts-1.7B activated"}
+            return {"message": "Model qwen-tts-1.7B activated", "warning": warning_message}
         if model_name == "qwen-tts-0.6B":
             await tts.get_tts_model().load_model_async("0.6B")
-            return {"message": "Model qwen-tts-0.6B activated"}
+            return {"message": "Model qwen-tts-0.6B activated", "warning": warning_message}
         if model_name == "whisper-base":
             await transcribe.get_whisper_model().load_model_async("base")
-            return {"message": "Model whisper-base activated"}
+            return {"message": "Model whisper-base activated", "warning": warning_message}
         if model_name == "whisper-small":
             await transcribe.get_whisper_model().load_model_async("small")
-            return {"message": "Model whisper-small activated"}
+            return {"message": "Model whisper-small activated", "warning": warning_message}
         if model_name == "whisper-medium":
             await transcribe.get_whisper_model().load_model_async("medium")
-            return {"message": "Model whisper-medium activated"}
+            return {"message": "Model whisper-medium activated", "warning": warning_message}
         if model_name == "whisper-large":
             await transcribe.get_whisper_model().load_model_async("large")
-            return {"message": "Model whisper-large activated"}
+            return {"message": "Model whisper-large activated", "warning": warning_message}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e)) from e
+        backend_type = get_backend_type()
+        tts_model = tts.get_tts_model()
+        device = getattr(tts_model, "device", None)
+        torch_dtype = getattr(tts_model, "torch_dtype", None)
+        error_text = str(e)
+        normalized_error = error_text.lower()
+
+        logger.exception(
+            "Model activation failed: model=%s backend=%s device=%s dtype=%s",
+            model_name,
+            backend_type,
+            device,
+            torch_dtype,
+            extra={"tags": ["models", "activate", "error"]},
+        )
+
+        if "device-side assert" in normalized_error:
+            logger.error(
+                "MODEL_ACTIVATE_CUDA_ASSERT model=%s backend=%s device=%s dtype=%s",
+                model_name,
+                backend_type,
+                device,
+                torch_dtype,
+                extra={"tags": ["models", "activate", "cuda_assert"]},
+            )
+            return JSONResponse(
+                status_code=503,
+                content={
+                    "detail": "CUDA runtime entered invalid state; restart backend process in Colab and retry.",
+                    "error_code": "MODEL_ACTIVATE_CUDA_ASSERT",
+                },
+            )
+
+        return JSONResponse(
+            status_code=500,
+            content={
+                "detail": error_text,
+                "error_code": "MODEL_ACTIVATE_RUNTIME_ERROR",
+            },
+        )
 
     raise HTTPException(status_code=400, detail=f"Unknown model: {model_name}")
 
@@ -2094,38 +2278,41 @@ def _get_gpu_status() -> str:
 @app.on_event("startup")
 async def startup_event():
     """Run on application startup."""
-    print("voicebox API starting up...")
-    print(f"Colab profile: {SETTINGS.colab_profile}")
-    print(f"API key protection enabled: {bool(SETTINGS.api_key)}")
+    runtime_logs.initialize_runtime_logs()
+    logger.info("voicebox API starting up...")
+    logger.info("Colab profile: %s", SETTINGS.colab_profile)
+    logger.info("API key protection enabled: %s", bool(SETTINGS.api_key))
     database.init_db()
-    print(f"Database initialized at {database._db_path}")
+    logger.info("Database initialized at %s", database._db_path)
     backend_type = get_backend_type()
-    print(f"Backend: {backend_type.upper()}")
-    print(f"GPU available: {_get_gpu_status()}")
+    logger.info("Backend: %s", backend_type.upper())
+    logger.info("GPU available: %s", _get_gpu_status())
 
     # Initialize progress manager with main event loop for thread-safe operations
     try:
         progress_manager = get_progress_manager()
         progress_manager._set_main_loop(asyncio.get_running_loop())
-        print("Progress manager initialized with event loop")
+        logger.info("Progress manager initialized with event loop")
     except Exception as e:
-        print(f"Warning: Could not initialize progress manager event loop: {e}")
+        logger.warning("Could not initialize progress manager event loop: %s", e)
 
     # Ensure HuggingFace cache directory exists
     try:
         from huggingface_hub import constants as hf_constants
         cache_dir = Path(hf_constants.HF_HUB_CACHE)
         cache_dir.mkdir(parents=True, exist_ok=True)
-        print(f"HuggingFace cache directory: {cache_dir}")
+        logger.info("HuggingFace cache directory: %s", cache_dir)
     except Exception as e:
-        print(f"Warning: Could not create HuggingFace cache directory: {e}")
-        print("Model downloads may fail. Please ensure the directory exists and has write permissions.")
+        logger.warning("Could not create HuggingFace cache directory: %s", e)
+        logger.warning(
+            "Model downloads may fail. Please ensure the directory exists and has write permissions."
+        )
 
 
 @app.on_event("shutdown")
 async def shutdown_event():
     """Run on application shutdown."""
-    print("voicebox API shutting down...")
+    logger.info("voicebox API shutting down...")
     # Unload models to free memory
     tts.unload_tts_model()
     transcribe.unload_whisper_model()

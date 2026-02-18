@@ -7,7 +7,8 @@ import {
   Play,
   Trash2,
 } from 'lucide-react';
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import {
   Dialog,
@@ -23,54 +24,65 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Textarea } from '@/components/ui/textarea';
 import { useToast } from '@/components/ui/use-toast';
 import { apiClient } from '@/lib/api/client';
-import type { HistoryResponse } from '@/lib/api/types';
+import type {
+  HistoryBulkDeleteRequest,
+  HistoryBulkDeleteResponse,
+  HistoryResponse,
+} from '@/lib/api/types';
 import { BOTTOM_SAFE_AREA_PADDING } from '@/lib/constants/ui';
 import {
+  useBulkDeleteHistory,
   useDeleteGeneration,
   useExportGeneration,
   useExportGenerationAudio,
   useHistory,
-  useImportGeneration,
 } from '@/lib/hooks/useHistory';
+import { useStories } from '@/lib/hooks/useStories';
 import { cn } from '@/lib/utils/cn';
 import { formatDate, formatDuration } from '@/lib/utils/format';
 import { usePlayerStore } from '@/stores/playerStore';
 
-// OLD TABLE-BASED COMPONENT - REMOVED (can be found in git history)
-// This is the new alternate history view with fixed height rows
+type OriginFilter = 'all' | 'linked' | 'orphan';
 
-// NEW ALTERNATE HISTORY VIEW - FIXED HEIGHT ROWS WITH INFINITE SCROLL
 export function HistoryTable() {
   const [page, setPage] = useState(0);
   const [allHistory, setAllHistory] = useState<HistoryResponse[]>([]);
   const [total, setTotal] = useState(0);
   const [isScrolled, setIsScrolled] = useState(false);
+  const [originFilter, setOriginFilter] = useState<OriginFilter>('all');
+  const [storyFilterId, setStoryFilterId] = useState<string>('');
+  const [bulkDialogOpen, setBulkDialogOpen] = useState(false);
+  const [bulkPreview, setBulkPreview] = useState<HistoryBulkDeleteResponse | null>(null);
+  const [pendingBulkRequest, setPendingBulkRequest] = useState<HistoryBulkDeleteRequest | null>(null);
+  const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
+  const [generationToDelete, setGenerationToDelete] = useState<HistoryResponse | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const loadMoreRef = useRef<HTMLDivElement>(null);
-  const fileInputRef = useRef<HTMLInputElement>(null);
-  const [importDialogOpen, setImportDialogOpen] = useState(false);
-  const [selectedFile, setSelectedFile] = useState<File | null>(null);
-  const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
-  const [generationToDelete, setGenerationToDelete] = useState<{ id: string; name: string } | null>(null);
   const limit = 20;
   const { toast } = useToast();
 
+  const { data: stories = [] } = useStories();
   const {
     data: historyData,
     isLoading,
     isFetching,
+    refetch,
   } = useHistory({
     limit,
     offset: page * limit,
+    origin: originFilter,
+    story_id: storyFilterId || undefined,
   });
 
   const deleteGeneration = useDeleteGeneration();
+  const bulkDeleteHistory = useBulkDeleteHistory();
   const exportGeneration = useExportGeneration();
   const exportGenerationAudio = useExportGenerationAudio();
-  const importGeneration = useImportGeneration();
+
   const setAudioWithAutoPlay = usePlayerStore((state) => state.setAudioWithAutoPlay);
   const restartCurrentAudio = usePlayerStore((state) => state.restartCurrentAudio);
   const currentAudioId = usePlayerStore((state) => state.audioId);
@@ -78,33 +90,38 @@ export function HistoryTable() {
   const audioUrl = usePlayerStore((state) => state.audioUrl);
   const isPlayerVisible = !!audioUrl;
 
-  // Update accumulated history when new data arrives
+  const selectedStoryName = useMemo(() => {
+    if (!storyFilterId) return '';
+    return stories.find((story) => story.id === storyFilterId)?.name ?? storyFilterId;
+  }, [stories, storyFilterId]);
+
   useEffect(() => {
-    if (historyData?.items) {
-      setTotal(historyData.total);
-      if (page === 0) {
-        // Reset to first page
-        setAllHistory(historyData.items);
-      } else {
-        // Append new items, avoiding duplicates
-        setAllHistory((prev) => {
-          const existingIds = new Set(prev.map((item) => item.id));
-          const newItems = historyData.items.filter((item) => !existingIds.has(item.id));
-          return [...prev, ...newItems];
-        });
-      }
+    setPage(0);
+    setAllHistory([]);
+  }, [originFilter, storyFilterId]);
+
+  useEffect(() => {
+    if (!historyData?.items) return;
+    setTotal(historyData.total);
+    if (page === 0) {
+      setAllHistory(historyData.items);
+      return;
     }
+    setAllHistory((prev) => {
+      const existingIds = new Set(prev.map((item) => item.id));
+      const newItems = historyData.items.filter((item) => !existingIds.has(item.id));
+      return [...prev, ...newItems];
+    });
   }, [historyData, page]);
 
-  // Reset to page 0 when deletions or imports occur
   useEffect(() => {
-    if (deleteGeneration.isSuccess || importGeneration.isSuccess) {
+    if (deleteGeneration.isSuccess || bulkDeleteHistory.isSuccess) {
       setPage(0);
       setAllHistory([]);
+      void refetch();
     }
-  }, [deleteGeneration.isSuccess, importGeneration.isSuccess]);
+  }, [deleteGeneration.isSuccess, bulkDeleteHistory.isSuccess, refetch]);
 
-  // Intersection Observer for infinite scroll
   useEffect(() => {
     const loadMoreEl = loadMoreRef.current;
     if (!loadMoreEl) return;
@@ -127,28 +144,24 @@ export function HistoryTable() {
     return () => observer.disconnect();
   }, [isFetching, allHistory.length, total]);
 
-  // Track scroll position for gradient effect
   useEffect(() => {
     const scrollEl = scrollRef.current;
     if (!scrollEl) return;
-
-    const handleScroll = () => {
-      setIsScrolled(scrollEl.scrollTop > 0);
-    };
-
+    const handleScroll = () => setIsScrolled(scrollEl.scrollTop > 0);
     scrollEl.addEventListener('scroll', handleScroll);
     return () => scrollEl.removeEventListener('scroll', handleScroll);
   }, []);
 
+  const history = allHistory;
+  const hasMore = allHistory.length < total;
+
   const handlePlay = (audioId: string, text: string, profileId: string) => {
-    // If clicking the same audio, restart it from the beginning
     if (currentAudioId === audioId) {
       restartCurrentAudio();
-    } else {
-      // Otherwise, load the new audio and auto-play it
-      const audioUrl = apiClient.getAudioUrl(audioId);
-      setAudioWithAutoPlay(audioUrl, audioId, profileId, text.substring(0, 50));
+      return;
     }
+    const trackUrl = apiClient.getAudioUrl(audioId);
+    setAudioWithAutoPlay(trackUrl, audioId, profileId, text.substring(0, 50));
   };
 
   const handleDownloadAudio = (generationId: string, text: string) => {
@@ -181,40 +194,90 @@ export function HistoryTable() {
     );
   };
 
-  const handleDeleteClick = (generationId: string, profileName: string) => {
-    setGenerationToDelete({ id: generationId, name: profileName });
+  const handleDeleteClick = (generation: HistoryResponse) => {
+    setGenerationToDelete(generation);
     setDeleteDialogOpen(true);
   };
 
   const handleDeleteConfirm = () => {
-    if (generationToDelete) {
-      deleteGeneration.mutate(generationToDelete.id);
-      setDeleteDialogOpen(false);
-      setGenerationToDelete(null);
+    if (!generationToDelete) return;
+    deleteGeneration.mutate(generationToDelete.id, {
+      onSuccess: () => {
+        toast({
+          title: 'Audio deleted',
+          description: 'Generation removed successfully.',
+        });
+      },
+      onError: (error) => {
+        toast({
+          title: 'Delete blocked',
+          description: error.message,
+          variant: 'destructive',
+        });
+      },
+    });
+    setDeleteDialogOpen(false);
+    setGenerationToDelete(null);
+  };
+
+  const buildBulkRequest = (scope: 'all' | 'orphans' | 'story', dryRun: boolean) => {
+    const payload: HistoryBulkDeleteRequest = {
+      scope,
+      dry_run: dryRun,
+    };
+    if (scope === 'story') {
+      payload.story_id = storyFilterId;
+      payload.detach_story_items = true;
+    }
+    return payload;
+  };
+
+  const openBulkPreview = async (scope: 'all' | 'orphans' | 'story') => {
+    if (scope === 'story' && !storyFilterId) {
+      toast({
+        title: 'Collection required',
+        description: 'Select a Story collection before deleting by collection.',
+        variant: 'destructive',
+      });
+      return;
+    }
+
+    try {
+      const request = buildBulkRequest(scope, true);
+      const preview = await bulkDeleteHistory.mutateAsync(request);
+      setPendingBulkRequest(buildBulkRequest(scope, false));
+      setBulkPreview(preview);
+      setBulkDialogOpen(true);
+    } catch (error) {
+      toast({
+        title: 'Preview failed',
+        description: error instanceof Error ? error.message : 'Unexpected error',
+        variant: 'destructive',
+      });
     }
   };
 
-  const handleImportConfirm = () => {
-    if (selectedFile) {
-      importGeneration.mutate(selectedFile, {
-        onSuccess: (data) => {
-          setImportDialogOpen(false);
-          setSelectedFile(null);
-          if (fileInputRef.current) {
-            fileInputRef.current.value = '';
-          }
-          toast({
-            title: 'Generation imported',
-            description: data.message || 'Generation imported successfully',
-          });
-        },
-        onError: (error) => {
-          toast({
-            title: 'Failed to import generation',
-            description: error.message,
-            variant: 'destructive',
-          });
-        },
+  const handleBulkConfirm = async () => {
+    if (!pendingBulkRequest) return;
+    try {
+      const result = await bulkDeleteHistory.mutateAsync(pendingBulkRequest);
+      setBulkDialogOpen(false);
+      setPendingBulkRequest(null);
+      setBulkPreview(null);
+      toast({
+        title: 'Bulk cleanup completed',
+        description: [
+          `Deleted: ${result.deleted_generations}`,
+          `Protected: ${result.protected_generations}`,
+          `Shared kept: ${result.retained_shared_generations}`,
+          `Story cards removed: ${result.deleted_story_items}`,
+        ].join(' · '),
+      });
+    } catch (error) {
+      toast({
+        title: 'Bulk cleanup failed',
+        description: error instanceof Error ? error.message : 'Unexpected error',
+        variant: 'destructive',
       });
     }
   };
@@ -227,14 +290,74 @@ export function HistoryTable() {
     );
   }
 
-  const history = allHistory;
-  const hasMore = allHistory.length < total;
-
   return (
     <div className="flex flex-col h-full min-h-0 relative">
+      <div className="mb-3 border rounded-md p-3 bg-card/60 space-y-3">
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-2">
+          <div className="space-y-1">
+            <div className="text-xs text-muted-foreground">Origin filter</div>
+            <Select value={originFilter} onValueChange={(value) => setOriginFilter(value as OriginFilter)}>
+              <SelectTrigger>
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">All</SelectItem>
+                <SelectItem value="linked">Linked to Story</SelectItem>
+                <SelectItem value="orphan">Orphans</SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
+          <div className="space-y-1">
+            <div className="text-xs text-muted-foreground">Collection (Story)</div>
+            <Select value={storyFilterId || '__all__'} onValueChange={(value) => setStoryFilterId(value === '__all__' ? '' : value)}>
+              <SelectTrigger>
+                <SelectValue placeholder="All stories" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="__all__">All stories</SelectItem>
+                {stories.map((story) => (
+                  <SelectItem key={story.id} value={story.id}>
+                    {story.name}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+          <div className="space-y-1">
+            <div className="text-xs text-muted-foreground">Quick cleanup</div>
+            <div className="flex flex-wrap gap-2">
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => void openBulkPreview('all')}
+                disabled={bulkDeleteHistory.isPending}
+              >
+                Delete All
+              </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => void openBulkPreview('orphans')}
+                disabled={bulkDeleteHistory.isPending}
+              >
+                Delete Orphans
+              </Button>
+              <Button
+                variant="destructive"
+                size="sm"
+                onClick={() => void openBulkPreview('story')}
+                disabled={bulkDeleteHistory.isPending || !storyFilterId}
+              >
+                Delete Collection
+              </Button>
+            </div>
+          </div>
+        </div>
+      </div>
+
       {history.length === 0 ? (
         <div className="text-center py-12 px-5 border-2 border-dashed mb-5 border-muted rounded-md text-muted-foreground flex-1 flex items-center justify-center">
-          No voice generations, yet...
+          No voice generations found for current filter.
         </div>
       ) : (
         <>
@@ -250,6 +373,7 @@ export function HistoryTable() {
           >
             {history.map((gen) => {
               const isCurrentlyPlaying = currentAudioId === gen.id && isPlaying;
+              const storyLabels = gen.story_links.map((link) => `${link.story_name} (${link.item_count})`);
               return (
                 <div
                   key={gen.id}
@@ -258,7 +382,6 @@ export function HistoryTable() {
                     isCurrentlyPlaying && 'bg-muted/70',
                   )}
                   onMouseDown={(e) => {
-                    // Don't trigger play if clicking on textarea or if text is selected
                     const target = e.target as HTMLElement;
                     if (target.closest('textarea') || window.getSelection()?.toString()) {
                       return;
@@ -266,28 +389,38 @@ export function HistoryTable() {
                     handlePlay(gen.id, gen.text, gen.profile_id);
                   }}
                 >
-                  {/* Waveform icon */}
                   <div className="flex items-center shrink-0">
                     <AudioWaveform className="h-5 w-5 text-muted-foreground" />
                   </div>
 
-                  {/* Left side - Meta information */}
-                  <div className="flex flex-col gap-1.5 w-48 shrink-0 justify-center">
+                  <div className="flex flex-col gap-1.5 w-60 shrink-0 justify-center">
                     <div className="font-medium text-sm truncate" title={gen.profile_name}>
                       {gen.profile_name}
                     </div>
-                    <div className="flex items-center gap-2">
+                    <div className="flex items-center gap-2 flex-wrap">
                       <span className="text-xs text-muted-foreground">{gen.language}</span>
                       <span className="text-xs text-muted-foreground">
                         {formatDuration(gen.duration)}
                       </span>
+                      {gen.is_orphan ? (
+                        <Badge variant="outline" className="text-[10px]">
+                          Orphan
+                        </Badge>
+                      ) : (
+                        <Badge variant="secondary" className="text-[10px]">
+                          Story x{gen.linked_story_count}
+                        </Badge>
+                      )}
                     </div>
-                    <div className="text-xs text-muted-foreground">
-                      {formatDate(gen.created_at)}
+                    <div
+                      className="text-xs text-muted-foreground truncate"
+                      title={storyLabels.join(', ')}
+                    >
+                      {gen.is_orphan ? 'Not linked to any story' : storyLabels.join(', ')}
                     </div>
+                    <div className="text-xs text-muted-foreground">{formatDate(gen.created_at)}</div>
                   </div>
 
-                  {/* Right side - Transcript textarea */}
                   <div className="flex-1 min-w-0 flex">
                     <Textarea
                       value={gen.text}
@@ -296,7 +429,6 @@ export function HistoryTable() {
                     />
                   </div>
 
-                  {/* Far right - Ellipsis actions */}
                   <div
                     className="w-10 shrink-0 flex justify-end"
                     onMouseDown={(e) => e.stopPropagation()}
@@ -304,19 +436,12 @@ export function HistoryTable() {
                   >
                     <DropdownMenu>
                       <DropdownMenuTrigger asChild>
-                        <Button
-                          variant="ghost"
-                          size="icon"
-                          className="h-8 w-8"
-                          aria-label="Actions"
-                        >
+                        <Button variant="ghost" size="icon" className="h-8 w-8" aria-label="Actions">
                           <MoreHorizontal className="h-4 w-4" />
                         </Button>
                       </DropdownMenuTrigger>
                       <DropdownMenuContent align="end">
-                        <DropdownMenuItem
-                          onClick={() => handlePlay(gen.id, gen.text, gen.profile_id)}
-                        >
+                        <DropdownMenuItem onClick={() => handlePlay(gen.id, gen.text, gen.profile_id)}>
                           <Play className="mr-2 h-4 w-4" />
                           Play
                         </DropdownMenuItem>
@@ -335,12 +460,12 @@ export function HistoryTable() {
                           Export Package
                         </DropdownMenuItem>
                         <DropdownMenuItem
-                          onClick={() => handleDeleteClick(gen.id, gen.profile_name)}
-                          disabled={deleteGeneration.isPending}
+                          onClick={() => handleDeleteClick(gen)}
+                          disabled={deleteGeneration.isPending || !gen.is_orphan}
                           className="text-destructive focus:text-destructive"
                         >
                           <Trash2 className="mr-2 h-4 w-4" />
-                          Delete
+                          {gen.is_orphan ? 'Delete' : 'Delete (protected)'}
                         </DropdownMenuItem>
                       </DropdownMenuContent>
                     </DropdownMenu>
@@ -349,18 +474,14 @@ export function HistoryTable() {
               );
             })}
 
-            {/* Load more trigger element */}
             {hasMore && (
               <div ref={loadMoreRef} className="flex items-center justify-center py-4">
                 {isFetching && <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />}
               </div>
             )}
 
-            {/* End of list indicator */}
             {!hasMore && history.length > 0 && (
-              <div className="text-center py-4 text-xs text-muted-foreground">
-                You've reached the end
-              </div>
+              <div className="text-center py-4 text-xs text-muted-foreground">You've reached the end</div>
             )}
           </div>
         </>
@@ -371,7 +492,9 @@ export function HistoryTable() {
           <DialogHeader>
             <DialogTitle>Delete Generation</DialogTitle>
             <DialogDescription>
-              Are you sure you want to delete this generation from "{generationToDelete?.name}"? This action cannot be undone.
+              {generationToDelete?.is_orphan
+                ? 'This orphan audio will be permanently deleted.'
+                : 'This generation is linked to story cards and is protected.'}
             </DialogDescription>
           </DialogHeader>
           <DialogFooter>
@@ -387,7 +510,7 @@ export function HistoryTable() {
             <Button
               variant="destructive"
               onClick={handleDeleteConfirm}
-              disabled={deleteGeneration.isPending}
+              disabled={deleteGeneration.isPending || !generationToDelete?.is_orphan}
             >
               {deleteGeneration.isPending ? 'Deleting...' : 'Delete'}
             </Button>
@@ -395,32 +518,51 @@ export function HistoryTable() {
         </DialogContent>
       </Dialog>
 
-      <Dialog open={importDialogOpen} onOpenChange={setImportDialogOpen}>
+      <Dialog open={bulkDialogOpen} onOpenChange={setBulkDialogOpen}>
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>Import Generation</DialogTitle>
+            <DialogTitle>Confirm Bulk Cleanup</DialogTitle>
             <DialogDescription>
-              Import the generation from "{selectedFile?.name}". This will add it to your history.
+              Review the dry-run result before deleting audio history.
             </DialogDescription>
           </DialogHeader>
+          {bulkPreview && (
+            <div className="space-y-2 text-sm">
+              <div>Scope: {bulkPreview.scope}</div>
+              {bulkPreview.scope === 'story' && (
+                <div>
+                  Collection: <span className="font-medium">{selectedStoryName || bulkPreview.story_id}</span>
+                </div>
+              )}
+              <div>Requested generations: {bulkPreview.requested_generations}</div>
+              <div>Will delete generations: {bulkPreview.deleted_generations}</div>
+              <div>Protected generations: {bulkPreview.protected_generations}</div>
+              <div>Shared generations retained: {bulkPreview.retained_shared_generations}</div>
+              <div>Story cards to remove: {bulkPreview.deleted_story_items}</div>
+              {bulkPreview.errors.length > 0 && (
+                <div className="text-xs text-muted-foreground">
+                  Notes: {bulkPreview.errors.slice(0, 3).join(' | ')}
+                </div>
+              )}
+            </div>
+          )}
           <DialogFooter>
             <Button
               variant="outline"
               onClick={() => {
-                setImportDialogOpen(false);
-                setSelectedFile(null);
-                if (fileInputRef.current) {
-                  fileInputRef.current.value = '';
-                }
+                setBulkDialogOpen(false);
+                setBulkPreview(null);
+                setPendingBulkRequest(null);
               }}
             >
               Cancel
             </Button>
             <Button
-              onClick={handleImportConfirm}
-              disabled={importGeneration.isPending || !selectedFile}
+              variant="destructive"
+              onClick={() => void handleBulkConfirm()}
+              disabled={bulkDeleteHistory.isPending || !pendingBulkRequest}
             >
-              {importGeneration.isPending ? 'Importing...' : 'Import'}
+              {bulkDeleteHistory.isPending ? 'Deleting...' : 'Execute Cleanup'}
             </Button>
           </DialogFooter>
         </DialogContent>

@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { apiClient } from '@/lib/api/client';
-import type { HistoryQuery } from '@/lib/api/types';
+import type { HistoryBulkDeleteRequest, HistoryQuery } from '@/lib/api/types';
 import { usePlatform } from '@/platform/PlatformContext';
 
 export function useHistory(query?: HistoryQuery) {
@@ -25,6 +25,18 @@ export function useDeleteGeneration() {
     mutationFn: (generationId: string) => apiClient.deleteGeneration(generationId),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['history'] });
+    },
+  });
+}
+
+export function useBulkDeleteHistory() {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: (data: HistoryBulkDeleteRequest) => apiClient.bulkDeleteHistory(data),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['history'] });
+      queryClient.invalidateQueries({ queryKey: ['stories'] });
     },
   });
 }

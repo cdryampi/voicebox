@@ -1,5 +1,6 @@
 import { ConnectionForm } from '@/components/ServerSettings/ConnectionForm';
 import { NotificationsSettings } from '@/components/ServerSettings/NotificationsSettings';
+import { ServerLogsPanel } from '@/components/ServerSettings/ServerLogsPanel';
 import { ServerStatus } from '@/components/ServerSettings/ServerStatus';
 import { UpdateStatus } from '@/components/ServerSettings/UpdateStatus';
 import { usePlatform } from '@/platform/PlatformContext';
@@ -12,6 +13,7 @@ export function ServerTab() {
         <ConnectionForm />
         <ServerStatus />
       </div>
+      <ServerLogsPanel />
       <NotificationsSettings />
       {platform.metadata.isTauri && <UpdateStatus />}
       <div className="py-8 text-center text-sm text-muted-foreground">

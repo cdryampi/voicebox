@@ -8,6 +8,8 @@ import type {
   GenerationResponse,
   GroqModelsResponse,
   HealthResponse,
+  HistoryBulkDeleteRequest,
+  HistoryBulkDeleteResponse,
   HistoryListResponse,
   HistoryQuery,
   HistoryResponse,
@@ -16,6 +18,8 @@ import type {
   ModelDefaultsUpdateRequest,
   ModelProgress,
   RuntimeInfoResponse,
+  ServerLogsQuery,
+  ServerLogsResponse,
   RuntimeModelsResponse,
   ModelStatusListResponse,
   ProfileSampleResponse,
@@ -176,14 +180,28 @@ class ApiClient {
 
     if (!response.ok) {
       let detail = response.statusText || `HTTP error! status: ${response.status}`;
+      let errorCode: string | undefined;
       try {
-        const parsed = JSON.parse(payload) as { detail?: string };
-        if (parsed?.detail) detail = parsed.detail;
+        const parsed = JSON.parse(payload) as {
+          detail?: string | { message?: string; error_code?: string };
+          error_code?: string;
+        };
+        if (typeof parsed?.detail === 'string') {
+          detail = parsed.detail;
+        } else if (parsed?.detail && typeof parsed.detail === 'object') {
+          const detailObj = parsed.detail;
+          detail = detailObj.message || JSON.stringify(detailObj);
+          if (detailObj.error_code) {
+            errorCode = detailObj.error_code;
+          }
+        }
+        if (parsed?.error_code) errorCode = parsed.error_code;
       } catch {
         if (payload.trim()) detail = payload;
       }
-      const error = new Error(detail) as Error & { status?: number };
+      const error = new Error(detail) as Error & { status?: number; errorCode?: string };
       error.status = response.status;
+      error.errorCode = errorCode;
       throw error;
     }
 
@@ -235,6 +253,24 @@ class ApiClient {
 
   async getRuntimeInfo(): Promise<RuntimeInfoResponse> {
     return this.request<RuntimeInfoResponse>('/runtime');
+  }
+
+  async getServerLogs(query?: ServerLogsQuery): Promise<ServerLogsResponse> {
+    const params = new URLSearchParams();
+    if (query?.limit) params.append('limit', query.limit.toString());
+    if (query?.level) params.append('level', query.level);
+    if (query?.contains) params.append('contains', query.contains);
+    const qs = params.toString();
+    return this.request<ServerLogsResponse>(qs ? `/server/logs?${qs}` : '/server/logs');
+  }
+
+  getServerLogsStreamUrl(query?: ServerLogsQuery): string {
+    const params = new URLSearchParams();
+    if (query?.level) params.append('level', query.level);
+    if (query?.contains) params.append('contains', query.contains);
+    const qs = params.toString();
+    const endpoint = qs ? `/server/logs/stream?${qs}` : '/server/logs/stream';
+    return this.buildAuthedUrl(endpoint);
   }
 
   // Profiles
@@ -384,6 +420,8 @@ class ApiClient {
     const params = new URLSearchParams();
     if (query?.profile_id) params.append('profile_id', query.profile_id);
     if (query?.search) params.append('search', query.search);
+    if (query?.origin) params.append('origin', query.origin);
+    if (query?.story_id) params.append('story_id', query.story_id);
     if (query?.limit) params.append('limit', query.limit.toString());
     if (query?.offset) params.append('offset', query.offset.toString());
 
@@ -400,6 +438,13 @@ class ApiClient {
   async deleteGeneration(generationId: string): Promise<void> {
     await this.request<void>(`/history/${generationId}`, {
       method: 'DELETE',
+    });
+  }
+
+  async bulkDeleteHistory(data: HistoryBulkDeleteRequest): Promise<HistoryBulkDeleteResponse> {
+    return this.request<HistoryBulkDeleteResponse>('/history/bulk-delete', {
+      method: 'POST',
+      body: JSON.stringify(data),
     });
   }
 
@@ -578,8 +623,8 @@ class ApiClient {
     return this.request<RuntimeModelsResponse>('/models/runtime');
   }
 
-  async activateModel(modelName: string): Promise<{ message: string }> {
-    return this.request<{ message: string }>('/models/activate', {
+  async activateModel(modelName: string): Promise<{ message: string; warning?: string }> {
+    return this.request<{ message: string; warning?: string }>('/models/activate', {
       method: 'POST',
       body: JSON.stringify({ model_name: modelName }),
     });

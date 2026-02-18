@@ -48,6 +48,7 @@ def build_server():
         '--hidden-import', 'backend.utils.cache',
         '--hidden-import', 'backend.utils.progress',
         '--hidden-import', 'backend.utils.hf_progress',
+        '--hidden-import', 'backend.utils.runtime_logs',
         '--hidden-import', 'backend.utils.validation',
         '--hidden-import', 'torch',
         '--hidden-import', 'transformers',

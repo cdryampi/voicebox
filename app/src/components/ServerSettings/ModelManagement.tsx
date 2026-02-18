@@ -59,6 +59,19 @@ export function ModelManagement() {
     staleTime: 2000,
   });
 
+  const { data: runtimeInfo } = useQuery({
+    queryKey: ['runtimeInfo'],
+    queryFn: async () => {
+      try {
+        return await apiClient.getRuntimeInfo();
+      } catch {
+        return null;
+      }
+    },
+    refetchInterval: 15000,
+    staleTime: 5000,
+  });
+
   // Callbacks for download completion
   const handleDownloadComplete = useCallback(() => {
     console.log('[ModelManagement] Download complete, clearing state');
@@ -126,17 +139,29 @@ export function ModelManagement() {
   const handleActivate = async (modelName: string) => {
     try {
       setActivatingModel(modelName);
-      await apiClient.activateModel(modelName);
+      const result = await apiClient.activateModel(modelName);
       toast({
         title: 'Model activated',
         description: `${modelName} is now loaded in runtime.`,
       });
+      if (result.warning) {
+        toast({
+          title: 'Memory safety switch',
+          description: result.warning,
+        });
+      }
       await queryClient.invalidateQueries({ queryKey: ['modelStatus'] });
       await queryClient.invalidateQueries({ queryKey: ['runtimeModels'] });
     } catch (error) {
+      const err = error as Error & { errorCode?: string };
+      const isCudaAssert = err.errorCode === 'MODEL_ACTIVATE_CUDA_ASSERT';
       toast({
-        title: 'Activation failed',
-        description: error instanceof Error ? error.message : 'Unknown error',
+        title: isCudaAssert ? 'Activation failed: CUDA runtime invalid' : 'Activation failed',
+        description: isCudaAssert
+          ? `${err.message} Restart backend process in Colab and retry.`
+          : error instanceof Error
+            ? error.message
+            : 'Unknown error',
         variant: 'destructive',
       });
     } finally {
@@ -198,6 +223,13 @@ export function ModelManagement() {
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-4">
+        {runtimeInfo?.colab_profile && runtimeInfo.torch_cuda_available && (
+          <div className="rounded-lg border border-amber-300/50 bg-amber-50/30 p-3 text-sm text-amber-800 dark:text-amber-200">
+            Colab CUDA mode: load models one by one. Activating Whisper unloads Qwen TTS and vice
+            versa to avoid VRAM crashes.
+          </div>
+        )}
+
         {runtimeModels && (
           <div className="rounded-lg border p-3 text-sm text-muted-foreground">
             <div>
