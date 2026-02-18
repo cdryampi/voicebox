@@ -80,7 +80,27 @@ export interface HealthResponse {
   model_downloaded?: boolean;
   model_size?: string;
   gpu_available: boolean;
+  gpu_type?: string;
   vram_used_mb?: number;
+  backend_type?: string;
+}
+
+export interface RuntimeInfoResponse {
+  backend_type: string;
+  host: string;
+  port: number;
+  colab_profile: boolean;
+  default_model_size: '1.7B' | '0.6B';
+  default_whisper_model_size: 'base' | 'small' | 'medium' | 'large';
+  torch_cuda_available: boolean;
+  torch_cuda_device?: string | null;
+  torch_mps_available: boolean;
+  tts_loaded: boolean;
+  tts_model_size?: '1.7B' | '0.6B' | null;
+  tts_device?: string | null;
+  tts_torch_dtype?: string | null;
+  data_dir: string;
+  vram_allocated_mb?: number;
 }
 
 export interface ModelProgress {

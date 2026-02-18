@@ -119,6 +119,7 @@ export function StudioTab() {
   const [mode, setMode] = useState<'novela' | 'roleplay'>('roleplay');
   const [language, setLanguage] = useState<LanguageCode>('es');
   const [selectedModel, setSelectedModel] = useState<string>('');
+  const [selectedIdeaModel, setSelectedIdeaModel] = useState<string>('');
   const [selectedModelSize, setSelectedModelSize] = useState<'0.6B' | '1.7B'>('0.6B');
   const [maxLines, setMaxLines] = useState(20);
   const [maxCharsPerLine, setMaxCharsPerLine] = useState(300);
@@ -167,6 +168,21 @@ export function StudioTab() {
       setSelectedModel(modelOptions[0]);
     }
   }, [selectedModel, groqModels?.default_model, modelOptions]);
+
+  useEffect(() => {
+    if (selectedIdeaModel && modelOptions.includes(selectedIdeaModel)) return;
+    if (selectedModel && modelOptions.includes(selectedModel)) {
+      setSelectedIdeaModel(selectedModel);
+      return;
+    }
+    if (groqModels?.default_model && modelOptions.includes(groqModels.default_model)) {
+      setSelectedIdeaModel(groqModels.default_model);
+      return;
+    }
+    if (modelOptions.length > 0) {
+      setSelectedIdeaModel(modelOptions[0]);
+    }
+  }, [selectedIdeaModel, selectedModel, groqModels?.default_model, modelOptions]);
 
   useEffect(() => {
     if (!profiles?.length) return;
@@ -329,9 +345,9 @@ export function StudioTab() {
 
   const canGenerateIdeas = useMemo(() => {
     if (!groqModels?.enabled) return false;
-    if (!characterDescription.trim() || !selectedModel) return false;
+    if (!characterDescription.trim() || !selectedIdeaModel) return false;
     return (profiles?.length ?? 0) > 0;
-  }, [characterDescription, groqModels?.enabled, profiles, selectedModel]);
+  }, [characterDescription, groqModels?.enabled, profiles, selectedIdeaModel]);
 
   const updateMapping = (index: number, patch: Partial<StoryCharacterMapping>) => {
     setMappings((prev) => prev.map((m, i) => (i === index ? { ...m, ...patch } : m)));
@@ -441,10 +457,10 @@ export function StudioTab() {
       });
       return;
     }
-    if (!selectedModel) {
+    if (!selectedIdeaModel) {
       toast({
         title: 'Model required',
-        description: 'Select a Groq model first.',
+        description: 'Select a Groq model for Idea Generator.',
         variant: 'destructive',
       });
       return;
@@ -464,7 +480,7 @@ export function StudioTab() {
         story_name_hint: name.trim() || undefined,
         mode,
         language,
-        llm_model: selectedModel,
+        llm_model: selectedIdeaModel,
         model_size: selectedModelSize,
         target_cards: 8,
       });
@@ -932,7 +948,7 @@ export function StudioTab() {
         </Card>
       </div>
 
-      <div className="flex-1 min-h-0 flex flex-col gap-4 overflow-hidden">
+      <div className="flex-1 min-h-0 flex flex-col gap-4 overflow-y-auto pr-1">
         <Card>
           <CardHeader className="pb-3">
             <CardTitle className="text-base flex items-center gap-2">
@@ -941,6 +957,23 @@ export function StudioTab() {
             </CardTitle>
           </CardHeader>
           <CardContent className="space-y-3">
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+              <div className="space-y-1">
+                <Label>Idea model (Groq)</Label>
+                <Select value={selectedIdeaModel} onValueChange={setSelectedIdeaModel}>
+                  <SelectTrigger>
+                    <SelectValue placeholder="Select model for ideas" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {modelOptions.map((model) => (
+                      <SelectItem key={`idea-${model}`} value={model}>
+                        {model}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+            </div>
             <Textarea
               value={characterDescription}
               onChange={(e) => setCharacterDescription(e.target.value)}
@@ -1127,7 +1160,7 @@ export function StudioTab() {
           </CardContent>
         </Card>
 
-        <div className="flex-1 min-h-0 overflow-y-auto space-y-3 pr-1">
+        <div className="space-y-3 pb-4">
           {isDraftLoading && <div className="text-sm text-muted-foreground">Loading draft...</div>}
 
           {!draftId && !isDraftLoading && (

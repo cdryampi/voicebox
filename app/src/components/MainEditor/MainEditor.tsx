@@ -86,7 +86,12 @@ export function MainEditor() {
         {/* Fixed Header */}
         <div className="absolute top-0 left-0 right-0 z-10">
           <div className="flex items-center justify-between mb-4 px-1">
-            <h2 className="text-2xl font-bold">Voicebox</h2>
+            <div>
+              <h2 className="text-2xl font-bold">Fast Generator</h2>
+              <p className="text-xs text-muted-foreground">
+                Quick one-shot generation. Use Studio for draft/audit workflows.
+              </p>
+            </div>
             <div className="flex gap-2">
               <Button variant="outline" onClick={handleImportClick}>
                 <Upload className="mr-2 h-4 w-4" />

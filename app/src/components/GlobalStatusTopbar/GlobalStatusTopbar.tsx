@@ -79,7 +79,7 @@ export function GlobalStatusTopbar() {
 
   return (
     <div className="w-full border-b border-border/70 bg-card/95 backdrop-blur supports-[backdrop-filter]:bg-card/80">
-      <div className="ml-20 px-6 py-2 flex flex-col gap-2">
+      <div className="ml-24 px-6 py-2 flex flex-col gap-2">
         <div className="flex items-center justify-between gap-3">
           <div className="flex items-center gap-3 min-w-0">
             <span className={`h-2.5 w-2.5 rounded-full ${stateColorClass}`} />
@@ -94,6 +94,12 @@ export function GlobalStatusTopbar() {
             </div>
           </div>
           <div className="flex items-center gap-2">
+            <Button size="sm" variant="ghost" asChild className="h-7 px-2 text-xs">
+              <Link to="/">Dashboard</Link>
+            </Button>
+            <Button size="sm" variant="ghost" asChild className="h-7 px-2 text-xs">
+              <Link to="/generate">Fast Gen</Link>
+            </Button>
             <Button size="sm" variant="ghost" asChild className="h-7 px-2 text-xs">
               <Link to="/studio">Studio</Link>
             </Button>

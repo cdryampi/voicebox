@@ -15,6 +15,7 @@ import type {
   ModelDefaultsResponse,
   ModelDefaultsUpdateRequest,
   ModelProgress,
+  RuntimeInfoResponse,
   RuntimeModelsResponse,
   ModelStatusListResponse,
   ProfileSampleResponse,
@@ -230,6 +231,10 @@ class ApiClient {
   // Health
   async getHealth(): Promise<HealthResponse> {
     return this.request<HealthResponse>('/health');
+  }
+
+  async getRuntimeInfo(): Promise<RuntimeInfoResponse> {
+    return this.request<RuntimeInfoResponse>('/runtime');
   }
 
   // Profiles

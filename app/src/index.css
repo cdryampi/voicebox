@@ -109,14 +109,7 @@
   body {
     @apply bg-background text-foreground;
   }
-  /* Hide scrollbars globally */
-  * {
-    scrollbar-width: none; /* Firefox */
-    -ms-overflow-style: none; /* IE and Edge */
-  }
-  *::-webkit-scrollbar {
-    display: none; /* Chrome, Safari, Opera */
-  }
+  /* Keep scrollbars visible for better discoverability of long content. */
 }
 
 @layer utilities {

@@ -1,6 +1,7 @@
 import { createRootRoute, createRoute, createRouter, Outlet } from '@tanstack/react-router';
 import { AppFrame } from '@/components/AppFrame/AppFrame';
 import { AudioTab } from '@/components/AudioTab/AudioTab';
+import { DashboardTab } from '@/components/DashboardTab/DashboardTab';
 import { MainEditor } from '@/components/MainEditor/MainEditor';
 import { ModelsTab } from '@/components/ModelsTab/ModelsTab';
 import { ServerTab } from '@/components/ServerTab/ServerTab';
@@ -54,8 +55,8 @@ function RootLayout() {
       <div className="flex flex-1 min-h-0 overflow-hidden">
         <Sidebar isMacOS={isMacOS()} />
 
-        <main className="flex-1 ml-20 overflow-hidden flex flex-col">
-          <div className="container mx-auto px-8 max-w-[1800px] h-full overflow-hidden flex flex-col">
+        <main className="flex-1 ml-24 overflow-hidden flex flex-col">
+          <div className="container mx-auto px-8 max-w-[1800px] h-full overflow-y-auto flex flex-col">
             <Outlet />
           </div>
         </main>
@@ -103,10 +104,17 @@ const rootRoute = createRootRoute({
   component: RootLayout,
 });
 
-// Index route (main/generate)
+// Home route (dashboard)
 const indexRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: '/',
+  component: DashboardTab,
+});
+
+// Fast generator route
+const generateRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: '/generate',
   component: MainEditor,
 });
 
@@ -162,6 +170,7 @@ const serverRoute = createRoute({
 // Route tree
 const routeTree = rootRoute.addChildren([
   indexRoute,
+  generateRoute,
   studioRoute,
   storiesRoute,
   storyPlayerRoute,

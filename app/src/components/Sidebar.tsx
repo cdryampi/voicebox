@@ -1,5 +1,16 @@
 import { Link, useMatchRoute, useRouterState } from '@tanstack/react-router';
-import { AudioLines, Box, BookOpen, Clapperboard, Loader2, Mic, Server, Speaker, Volume2 } from 'lucide-react';
+import {
+  AudioLines,
+  Box,
+  BookOpen,
+  Clapperboard,
+  Gauge,
+  Loader2,
+  Mic,
+  Server,
+  Speaker,
+  Volume2,
+} from 'lucide-react';
 import voiceboxLogo from '@/assets/voicebox-logo.png';
 import { cn } from '@/lib/utils/cn';
 import { useGenerationStore } from '@/stores/generationStore';
@@ -10,9 +21,10 @@ interface SidebarProps {
 }
 
 const tabs = [
-  { id: 'main', path: '/', icon: Volume2, label: 'Generate' },
+  { id: 'dashboard', path: '/', icon: Gauge, label: 'Dashboard' },
+  { id: 'fast-generator', path: '/generate', icon: Volume2, label: 'Fast Gen' },
   { id: 'studio', path: '/studio', icon: Clapperboard, label: 'Studio' },
-  { id: 'stories', path: '/stories', icon: BookOpen, label: 'Stories' },
+  { id: 'stories', path: '/stories', icon: BookOpen, label: 'Stories (Legacy)' },
   { id: 'story-player', path: '/story-player', icon: AudioLines, label: 'Story Player' },
   { id: 'voices', path: '/voices', icon: Mic, label: 'Voices' },
   { id: 'audio', path: '/audio', icon: Speaker, label: 'Audio' },
@@ -30,7 +42,7 @@ export function Sidebar({ isMacOS }: SidebarProps) {
   return (
     <div
       className={cn(
-        'fixed left-0 top-0 h-full w-20 bg-sidebar border-r border-border flex flex-col items-center py-6 gap-6',
+        'fixed left-0 top-0 h-full w-24 bg-sidebar border-r border-border flex flex-col items-center py-6 gap-6',
         isMacOS && 'pt-14',
       )}
     >
@@ -40,7 +52,7 @@ export function Sidebar({ isMacOS }: SidebarProps) {
       </div>
 
       {/* Navigation Buttons */}
-      <div className="flex flex-col gap-3">
+      <div className="flex flex-col gap-2">
         {tabs.map((tab) => {
           const Icon = tab.icon;
           // For index route, use exact match; for others, use default matching
@@ -54,7 +66,7 @@ export function Sidebar({ isMacOS }: SidebarProps) {
               key={tab.id}
               to={tab.path}
               className={cn(
-                'w-12 h-12 rounded-full flex items-center justify-center transition-all duration-200',
+                'w-20 h-14 rounded-xl flex flex-col items-center justify-center gap-1 transition-all duration-200',
                 'hover:bg-muted/50',
                 isActive ? 'bg-muted/50 text-foreground shadow-lg' : 'text-muted-foreground',
               )}
@@ -62,6 +74,7 @@ export function Sidebar({ isMacOS }: SidebarProps) {
               aria-label={tab.label}
             >
               <Icon className="h-5 w-5" />
+              <span className="text-[10px] leading-none font-medium">{tab.label}</span>
             </Link>
           );
         })}
