@@ -30,6 +30,22 @@ export function useStory(storyId: string | null) {
   });
 }
 
+export function useStoryRenderStatus(jobId: string | null) {
+  return useQuery({
+    queryKey: ['stories', 'jobs', jobId],
+    queryFn: () => apiClient.getStoryRenderStatus(jobId!),
+    enabled: !!jobId,
+    refetchInterval: (query) => {
+      const status = query.state.data?.status;
+      if (!status) return 2000;
+      if (status === 'completed' || status === 'failed' || status === 'partial_failed') {
+        return false;
+      }
+      return 2000;
+    },
+  });
+}
+
 export function useCreateStory() {
   const queryClient = useQueryClient();
 

@@ -57,3 +57,10 @@ def get_models_dir() -> Path:
     path = _data_dir / "models"
     path.mkdir(parents=True, exist_ok=True)
     return path
+
+
+def get_stories_dir() -> Path:
+    """Get stories output directory path."""
+    path = _data_dir / "stories"
+    path.mkdir(parents=True, exist_ok=True)
+    return path

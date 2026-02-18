@@ -1,24 +1,20 @@
-import { FloatingGenerateBox } from '@/components/Generation/FloatingGenerateBox';
-import { StoryContent } from './StoryContent';
-import { StoryList } from './StoryList';
+import { Link } from '@tanstack/react-router';
+import { Button } from '@/components/ui/button';
+import { StoryComposerPanel } from './StoryComposerPanel';
 
 export function StoriesTab() {
   return (
-    <div className="flex flex-col h-full min-h-0 overflow-hidden">
-      {/* Main content area */}
-      <div className="flex-1 min-h-0 flex gap-6 overflow-hidden relative">
-        {/* Left Column - Story List */}
-        <div className="flex flex-col min-h-0 overflow-hidden w-full max-w-[360px] shrink-0">
-          <StoryList />
+    <div className="flex h-full min-h-0 overflow-hidden">
+      <div className="w-full max-w-[1400px] mx-auto py-2 overflow-y-auto">
+        <div className="mb-4 rounded-lg border p-3 flex items-center justify-between gap-3">
+          <div className="text-sm text-muted-foreground">
+            Legacy quick composer. For full draft/audit flow, use Studio.
+          </div>
+          <Button asChild size="sm" variant="outline">
+            <Link to="/studio">Open Studio</Link>
+          </Button>
         </div>
-
-        {/* Right Column - Story Content */}
-        <div className="flex flex-col min-h-0 overflow-hidden flex-1">
-          <StoryContent />
-        </div>
-
-        {/* Floating Generate Box - position is managed via storyStore.trackEditorHeight */}
-        <FloatingGenerateBox showVoiceSelector />
+        <StoryComposerPanel />
       </div>
     </div>
   );

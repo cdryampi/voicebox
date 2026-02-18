@@ -24,6 +24,7 @@ export function ModelManagement() {
   const queryClient = useQueryClient();
   const [downloadingModel, setDownloadingModel] = useState<string | null>(null);
   const [downloadingDisplayName, setDownloadingDisplayName] = useState<string | null>(null);
+  const [activatingModel, setActivatingModel] = useState<string | null>(null);
 
   const { data: modelStatus, isLoading } = useQuery({
     queryKey: ['modelStatus'],
@@ -33,7 +34,29 @@ export function ModelManagement() {
       console.log('[Query] Model status fetched:', result);
       return result;
     },
-    refetchInterval: 5000, // Refresh every 5 seconds
+    refetchInterval: (query) => {
+      const data = query.state.data;
+      const hasActiveDownloads = !!data?.models?.some((m) => m.downloading);
+      return hasActiveDownloads ? 1500 : 15000;
+    },
+    staleTime: 2000,
+  });
+
+  const { data: runtimeModels } = useQuery({
+    queryKey: ['runtimeModels'],
+    queryFn: async () => {
+      try {
+        return await apiClient.getRuntimeModels();
+      } catch (error) {
+        const status = (error as { status?: number })?.status;
+        if (status === 404) {
+          return null;
+        }
+        throw error;
+      }
+    },
+    refetchInterval: 5000,
+    staleTime: 2000,
   });
 
   // Callbacks for download completion
@@ -100,6 +123,27 @@ export function ModelManagement() {
     }
   };
 
+  const handleActivate = async (modelName: string) => {
+    try {
+      setActivatingModel(modelName);
+      await apiClient.activateModel(modelName);
+      toast({
+        title: 'Model activated',
+        description: `${modelName} is now loaded in runtime.`,
+      });
+      await queryClient.invalidateQueries({ queryKey: ['modelStatus'] });
+      await queryClient.invalidateQueries({ queryKey: ['runtimeModels'] });
+    } catch (error) {
+      toast({
+        title: 'Activation failed',
+        description: error instanceof Error ? error.message : 'Unknown error',
+        variant: 'destructive',
+      });
+    } finally {
+      setActivatingModel(null);
+    }
+  };
+
   const deleteMutation = useMutation({
     mutationFn: async (modelName: string) => {
       console.log('[Delete] Deleting model:', modelName);
@@ -154,6 +198,22 @@ export function ModelManagement() {
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-4">
+        {runtimeModels && (
+          <div className="rounded-lg border p-3 text-sm text-muted-foreground">
+            <div>
+              Current runtime:
+              {' '}
+              <span className="font-medium text-foreground">
+                TTS {runtimeModels.tts_loaded_model_size ?? 'not loaded'}
+              </span>
+              {' · '}
+              <span className="font-medium text-foreground">
+                Whisper {runtimeModels.whisper_loaded_model_size ?? 'not loaded'}
+              </span>
+            </div>
+          </div>
+        )}
+
         {isLoading ? (
           <div className="flex items-center justify-center py-8">
             <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
@@ -181,7 +241,9 @@ export function ModelManagement() {
                         });
                         setDeleteDialogOpen(true);
                       }}
+                      onActivate={() => handleActivate(model.model_name)}
                       isDownloading={downloadingModel === model.model_name}
+                      isActivating={activatingModel === model.model_name}
                       formatSize={formatSize}
                     />
                   ))}
@@ -209,7 +271,9 @@ export function ModelManagement() {
                         });
                         setDeleteDialogOpen(true);
                       }}
+                      onActivate={() => handleActivate(model.model_name)}
                       isDownloading={downloadingModel === model.model_name}
+                      isActivating={activatingModel === model.model_name}
                       formatSize={formatSize}
                     />
                   ))}
@@ -275,11 +339,21 @@ interface ModelItemProps {
   };
   onDownload: () => void;
   onDelete: () => void;
+  onActivate: () => void;
   isDownloading: boolean;  // Local state - true if user just clicked download
+  isActivating: boolean;
   formatSize: (sizeMb?: number) => string;
 }
 
-function ModelItem({ model, onDownload, onDelete, isDownloading, formatSize }: ModelItemProps) {
+function ModelItem({
+  model,
+  onDownload,
+  onDelete,
+  onActivate,
+  isDownloading,
+  isActivating,
+  formatSize,
+}: ModelItemProps) {
   // Use server's downloading state OR local state (for immediate feedback before server updates)
   const showDownloading = model.downloading || isDownloading;
   
@@ -309,9 +383,18 @@ function ModelItem({ model, onDownload, onDelete, isDownloading, formatSize }: M
       <div className="flex items-center gap-2">
         {model.downloaded && !showDownloading ? (
           <div className="flex items-center gap-2">
-            <div className="flex items-center gap-1 text-sm text-muted-foreground">
-              <span>Ready</span>
-            </div>
+            {!model.loaded && (
+              <Button size="sm" onClick={onActivate} variant="outline" disabled={isActivating}>
+                {isActivating ? (
+                  <>
+                    <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                    Loading...
+                  </>
+                ) : (
+                  'Load'
+                )}
+              </Button>
+            )}
             <Button
               size="sm"
               onClick={onDelete}

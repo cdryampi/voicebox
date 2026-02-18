@@ -8,6 +8,8 @@ Use `voicebox_t4_deploy.example.ipynb` as the versioned template to run the full
 - `VOICEBOX_HOST=0.0.0.0`
 - `VOICEBOX_PORT=17493`
 - `VOICEBOX_DEFAULT_MODEL_SIZE=0.6B`
+- `VOICEBOX_DB_USE_NULL_POOL=true` (recommended for SQLite in Colab)
+- `VOICEBOX_ALLOWED_ORIGINS=http://localhost:5174,http://127.0.0.1:5174`
 - `VOICEBOX_API_KEY` for remote protection
 - `VOICEBOX_DATA_DIR` (recommended in Google Drive)
 - optional `VOICEBOX_GROQ_API_KEY` for Story Director endpoints

@@ -23,6 +23,24 @@ def _parse_csv(value: Optional[str]) -> List[str]:
     return [item.strip() for item in value.split(",") if item.strip()]
 
 
+def _parse_int(value: Optional[str], default: int, minimum: int = 1) -> int:
+    if value is None:
+        return default
+    try:
+        return max(minimum, int(value))
+    except (TypeError, ValueError):
+        return default
+
+
+def _parse_float(value: Optional[str], default: float, minimum: float = 0.0) -> float:
+    if value is None:
+        return default
+    try:
+        return max(minimum, float(value))
+    except (TypeError, ValueError):
+        return default
+
+
 @dataclass(frozen=True)
 class BackendSettings:
     api_key: Optional[str]
@@ -38,6 +56,12 @@ class BackendSettings:
     groq_timeout_seconds: int
     default_model_size: str
     default_whisper_model_size: str
+    db_pool_size: int
+    db_max_overflow: int
+    db_pool_timeout_seconds: int
+    db_pool_recycle_seconds: int
+    db_connect_timeout_seconds: float
+    db_use_null_pool: bool
 
 
 def load_settings() -> BackendSettings:
@@ -50,11 +74,26 @@ def load_settings() -> BackendSettings:
 
     allowed_origins = _parse_csv(os.getenv("VOICEBOX_ALLOWED_ORIGINS"))
     if not allowed_origins:
-        # Preserve compatibility with current local behavior.
-        allowed_origins = ["*"]
+        if colab_profile:
+            # In remote Colab mode prefer explicit origins to avoid CORS issues with credentials.
+            allowed_origins = [
+                "http://localhost:5173",
+                "http://localhost:5174",
+                "http://127.0.0.1:5173",
+                "http://127.0.0.1:5174",
+            ]
+        else:
+            # Preserve compatibility with current local behavior.
+            allowed_origins = ["*"]
 
     host_default = "0.0.0.0" if colab_profile else "127.0.0.1"
     default_model_size = "0.6B" if colab_profile else "1.7B"
+    default_db_pool_size = 20 if colab_profile else 5
+    default_db_max_overflow = 40 if colab_profile else 10
+    default_db_pool_timeout = 120 if colab_profile else 30
+    default_db_pool_recycle = 1800
+    default_db_connect_timeout = 60.0 if colab_profile else 30.0
+    default_db_use_null_pool = True if colab_profile else False
     default_whisper_model_size = os.getenv("VOICEBOX_DEFAULT_WHISPER_MODEL_SIZE", "base")
     if default_whisper_model_size not in {"base", "small", "medium", "large"}:
         default_whisper_model_size = "base"
@@ -89,4 +128,33 @@ def load_settings() -> BackendSettings:
         groq_timeout_seconds=int(os.getenv("VOICEBOX_GROQ_TIMEOUT_SECONDS", "20")),
         default_model_size=os.getenv("VOICEBOX_DEFAULT_MODEL_SIZE", default_model_size),
         default_whisper_model_size=default_whisper_model_size,
+        db_pool_size=_parse_int(
+            os.getenv("VOICEBOX_DB_POOL_SIZE"),
+            default=default_db_pool_size,
+            minimum=1,
+        ),
+        db_max_overflow=_parse_int(
+            os.getenv("VOICEBOX_DB_MAX_OVERFLOW"),
+            default=default_db_max_overflow,
+            minimum=0,
+        ),
+        db_pool_timeout_seconds=_parse_int(
+            os.getenv("VOICEBOX_DB_POOL_TIMEOUT_SECONDS"),
+            default=default_db_pool_timeout,
+            minimum=1,
+        ),
+        db_pool_recycle_seconds=_parse_int(
+            os.getenv("VOICEBOX_DB_POOL_RECYCLE_SECONDS"),
+            default=default_db_pool_recycle,
+            minimum=30,
+        ),
+        db_connect_timeout_seconds=_parse_float(
+            os.getenv("VOICEBOX_DB_CONNECT_TIMEOUT_SECONDS"),
+            default=default_db_connect_timeout,
+            minimum=1.0,
+        ),
+        db_use_null_pool=_parse_bool(
+            os.getenv("VOICEBOX_DB_USE_NULL_POOL"),
+            default=default_db_use_null_pool,
+        ),
     )

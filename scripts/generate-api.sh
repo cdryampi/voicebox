@@ -4,9 +4,10 @@
 set -e
 
 echo "Generating OpenAPI client..."
+API_PORT=17493
 
 # Check if backend is running
-if ! curl -s http://localhost:8000/openapi.json > /dev/null 2>&1; then
+if ! curl -s "http://localhost:${API_PORT}/openapi.json" > /dev/null 2>&1; then
     echo "Backend not running. Starting backend..."
     cd backend
     
@@ -26,19 +27,19 @@ if ! curl -s http://localhost:8000/openapi.json > /dev/null 2>&1; then
     
     # Start backend in background
     echo "Starting backend server..."
-    uvicorn main:app --port 8000 &
+    uvicorn main:app --port ${API_PORT} &
     BACKEND_PID=$!
     
     # Wait for server to be ready
     echo "Waiting for server to start..."
     for i in {1..30}; do
-        if curl -s http://localhost:8000/openapi.json > /dev/null 2>&1; then
+        if curl -s "http://localhost:${API_PORT}/openapi.json" > /dev/null 2>&1; then
             break
         fi
         sleep 1
     done
     
-    if ! curl -s http://localhost:8000/openapi.json > /dev/null 2>&1; then
+    if ! curl -s "http://localhost:${API_PORT}/openapi.json" > /dev/null 2>&1; then
         echo "Error: Backend failed to start"
         kill $BACKEND_PID 2>/dev/null || true
         exit 1
@@ -52,7 +53,7 @@ fi
 
 # Download OpenAPI schema
 echo "Downloading OpenAPI schema..."
-curl -s http://localhost:8000/openapi.json > app/openapi.json
+curl -s "http://localhost:${API_PORT}/openapi.json" > app/openapi.json
 
 # Check if openapi-typescript-codegen is installed
 if ! bunx --bun openapi-typescript-codegen --version > /dev/null 2>&1; then

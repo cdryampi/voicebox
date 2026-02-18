@@ -59,15 +59,6 @@ export function StoryContent() {
     );
   }, [historyData, story, searchQuery]);
 
-  // Get track editor height from store for dynamic padding
-  const trackEditorHeight = useStoryStore((state) => state.trackEditorHeight);
-
-  // Track editor is shown when story has items
-  const hasBottomBar = story && story.items.length > 0;
-
-  // Calculate dynamic bottom padding: track editor + gap
-  const bottomPadding = hasBottomBar ? trackEditorHeight + 24 : 0;
-
   // Drag and drop sensors
   const sensors = useSensors(
     useSensor(PointerSensor, {
@@ -327,7 +318,6 @@ export function StoryContent() {
       <div
         ref={scrollRef}
         className="flex-1 min-h-0 overflow-y-auto space-y-3"
-        style={{ paddingBottom: bottomPadding > 0 ? `${bottomPadding}px` : undefined }}
       >
         {sortedItems.length === 0 ? (
           <div className="text-center py-12 px-5 border-2 border-dashed border-muted rounded-md text-muted-foreground">

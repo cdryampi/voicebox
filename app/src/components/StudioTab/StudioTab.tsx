@@ -26,6 +26,7 @@ import {
   useGenerateStudioLinePreview,
   useGroqModels,
   useRenderStudioDraftFinal,
+  useStoryRenderStatus,
   useStories,
   useStudioDraft,
   useStudioDrafts,
@@ -56,6 +57,21 @@ function clampLimits(value: number, min: number, max: number, fallback: number):
 function clampCharacters(value: number): number {
   if (Number.isNaN(value)) return 1;
   return Math.min(10, Math.max(1, Math.round(value)));
+}
+
+function serializeDraftLines(lines: StudioDraftLineResponse[]): string {
+  return JSON.stringify(
+    [...lines]
+      .sort((a, b) => a.order_index - b.order_index)
+      .map((line) => ({
+        id: line.id,
+        order_index: line.order_index,
+        character_name: line.character_name,
+        text: line.text,
+        emotion: line.emotion,
+        emotion_intensity: Number(line.emotion_intensity.toFixed(3)),
+      })),
+  );
 }
 
 export function StudioTab() {
@@ -109,7 +125,13 @@ export function StudioTab() {
   const [lines, setLines] = useState<StudioDraftLineResponse[]>([]);
   const [selectedLineIds, setSelectedLineIds] = useState<string[]>([]);
   const [previewAudioByLine, setPreviewAudioByLine] = useState<Record<string, string>>({});
+  const [savedLinesHash, setSavedLinesHash] = useState('');
+  const [activeLineId, setActiveLineId] = useState<string | null>(null);
+  const [renderJobId, setRenderJobId] = useState<string | null>(null);
   const previewAudioUrlsRef = useRef<Map<string, string>>(new Map());
+  const autosaveTimeoutRef = useRef<number | null>(null);
+
+  const { data: renderJobStatus } = useStoryRenderStatus(renderJobId);
 
   const modelOptions = groqModels?.models ?? [];
   const selectedStory = useMemo(
@@ -148,7 +170,9 @@ export function StudioTab() {
 
   useEffect(() => {
     if (!draftDetail) return;
-    setLines([...draftDetail.lines].sort((a, b) => a.order_index - b.order_index));
+    const sortedLines = [...draftDetail.lines].sort((a, b) => a.order_index - b.order_index);
+    setLines(sortedLines);
+    setSavedLinesHash(serializeDraftLines(sortedLines));
     setMappings(draftDetail.character_mappings.slice(0, 10));
     setName(draftDetail.name);
     setDescription(draftDetail.description ?? '');
@@ -160,6 +184,7 @@ export function StudioTab() {
     setMaxLines(draftDetail.limits_applied.max_lines);
     setMaxCharsPerLine(draftDetail.limits_applied.max_chars_per_line);
     setPreviewSeconds(draftDetail.limits_applied.preview_seconds);
+    setRenderJobId(null);
   }, [draftDetail]);
 
   useEffect(() => {
@@ -322,7 +347,10 @@ export function StudioTab() {
     }
   };
 
-  const handleSaveDraft = async () => {
+  const hasUnsavedLines =
+    !!draftId && lines.length > 0 && serializeDraftLines(lines) !== savedLinesHash;
+
+  const persistDraft = async (showToast = true) => {
     if (!draftId || !lines.length) return;
     try {
       const updated = await updateStudioLines.mutateAsync({
@@ -338,23 +366,29 @@ export function StudioTab() {
           })),
         },
       });
-      setLines([...updated.lines].sort((a, b) => a.order_index - b.order_index));
-      toast({ title: 'Draft saved', description: 'Cards have been updated.' });
+      const sortedLines = [...updated.lines].sort((a, b) => a.order_index - b.order_index);
+      setLines(sortedLines);
+      setSavedLinesHash(serializeDraftLines(sortedLines));
+      if (showToast) {
+        toast({ title: 'Draft saved', description: 'Cards have been updated.' });
+      }
       return updated;
     } catch (error) {
-      toast({
-        title: 'Save failed',
-        description: error instanceof Error ? error.message : 'Unexpected error',
-        variant: 'destructive',
-      });
+      if (showToast) {
+        toast({
+          title: 'Save failed',
+          description: error instanceof Error ? error.message : 'Unexpected error',
+          variant: 'destructive',
+        });
+      }
       return null;
     }
   };
 
+  const handleSaveDraft = async () => persistDraft(true);
+
   const handlePreviewLine = async (lineId: string) => {
     if (!draftId) return;
-    const targetLine = lines.find((line) => line.id === lineId);
-    if (!targetLine) return;
     try {
       const existingUrl = previewAudioUrlsRef.current.get(lineId);
       if (existingUrl) {
@@ -363,21 +397,10 @@ export function StudioTab() {
         setPreviewAudioByLine(Object.fromEntries(previewAudioUrlsRef.current.entries()));
       }
 
-      await updateStudioLines.mutateAsync({
-        draftId,
-        data: {
-          lines: [
-            {
-              line_id: targetLine.id,
-              character_name: targetLine.character_name,
-              text: targetLine.text,
-              emotion: targetLine.emotion,
-              emotion_intensity: clamp01(targetLine.emotion_intensity),
-              order_index: targetLine.order_index,
-            },
-          ],
-        },
-      });
+      if (hasUnsavedLines) {
+        const saved = await persistDraft(false);
+        if (!saved) return;
+      }
 
       await generatePreview.mutateAsync({ draftId, lineId });
       await refetchDraft();
@@ -393,16 +416,16 @@ export function StudioTab() {
 
   const handleRenderFinal = async () => {
     if (!draftId) return;
-    const saved = await handleSaveDraft();
+    const saved = await persistDraft(true);
     if (!saved) return;
     try {
       const result = await renderFinal.mutateAsync(draftId);
       setSelectedStoryId(result.story_id);
+      setRenderJobId(result.job_id);
       toast({
         title: 'Final render queued',
         description: `Job ${result.job_id} started.`,
       });
-      navigate({ to: '/story-player' });
     } catch (error) {
       toast({
         title: 'Render failed',
@@ -411,6 +434,49 @@ export function StudioTab() {
       });
     }
   };
+
+  useEffect(() => {
+    if (!hasUnsavedLines || updateStudioLines.isPending) {
+      if (autosaveTimeoutRef.current !== null) {
+        window.clearTimeout(autosaveTimeoutRef.current);
+        autosaveTimeoutRef.current = null;
+      }
+      return;
+    }
+
+    autosaveTimeoutRef.current = window.setTimeout(() => {
+      void persistDraft(false);
+    }, 800);
+
+    return () => {
+      if (autosaveTimeoutRef.current !== null) {
+        window.clearTimeout(autosaveTimeoutRef.current);
+        autosaveTimeoutRef.current = null;
+      }
+    };
+  }, [hasUnsavedLines, updateStudioLines.isPending, lines]);
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      const isCmdOrCtrl = event.metaKey || event.ctrlKey;
+      if (!isCmdOrCtrl) return;
+
+      if (event.key.toLowerCase() === 's') {
+        event.preventDefault();
+        void handleSaveDraft();
+      }
+
+      if (event.key === 'Enter' && activeLineId && draftId) {
+        event.preventDefault();
+        void handlePreviewLine(activeLineId);
+      }
+    };
+
+    window.addEventListener('keydown', onKeyDown);
+    return () => {
+      window.removeEventListener('keydown', onKeyDown);
+    };
+  }, [activeLineId, draftId, lines]);
 
   const updateLine = (lineId: string, patch: Partial<StudioDraftLineResponse>) => {
     setLines((prev) =>
@@ -468,7 +534,9 @@ export function StudioTab() {
         draftId,
         data: { line_ids: selectedLineIds },
       });
-      setLines([...updated.lines].sort((a, b) => a.order_index - b.order_index));
+      const sortedLines = [...updated.lines].sort((a, b) => a.order_index - b.order_index);
+      setLines(sortedLines);
+      setSavedLinesHash(serializeDraftLines(sortedLines));
       setSelectedLineIds([]);
       setPreviewAudioByLine(Object.fromEntries(previewAudioUrlsRef.current.entries()));
       toast({
@@ -806,7 +874,7 @@ export function StudioTab() {
           )}
 
           {!!lines.length && (
-            <Card>
+            <Card className="sticky top-0 z-10">
               <CardContent className="pt-4 flex flex-wrap items-center justify-between gap-3">
                 <div className="flex items-center gap-3">
                   <div className="flex items-center gap-2">
@@ -820,17 +888,31 @@ export function StudioTab() {
                         : 'Select cards'}
                     </span>
                   </div>
+                  <span className="text-xs text-muted-foreground">
+                    {lines.length} card(s) · {hasUnsavedLines ? 'Unsaved changes' : 'Saved'}
+                  </span>
                 </div>
-                <Button
-                  type="button"
-                  variant="destructive"
-                  size="sm"
-                  onClick={handleDeleteSelected}
-                  disabled={selectedLineIds.length === 0 || deleteStudioLines.isPending}
-                >
-                  <Trash2 className="h-4 w-4 mr-2" />
-                  Delete Selected
-                </Button>
+                <div className="flex items-center gap-2">
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    onClick={() => void handleSaveDraft()}
+                    disabled={!hasUnsavedLines || updateStudioLines.isPending}
+                  >
+                    Save
+                  </Button>
+                  <Button
+                    type="button"
+                    variant="destructive"
+                    size="sm"
+                    onClick={handleDeleteSelected}
+                    disabled={selectedLineIds.length === 0 || deleteStudioLines.isPending}
+                  >
+                    <Trash2 className="h-4 w-4 mr-2" />
+                    Delete Selected
+                  </Button>
+                </div>
               </CardContent>
             </Card>
           )}
@@ -843,7 +925,11 @@ export function StudioTab() {
               (profiles ?? []).find((p) => p.id === line.profile_id)?.name ?? line.profile_id;
             return (
               <Card key={line.id}>
-                <CardContent className="pt-4 space-y-3">
+                <CardContent
+                  className="pt-4 space-y-3"
+                  onClick={() => setActiveLineId(line.id)}
+                  onFocusCapture={() => setActiveLineId(line.id)}
+                >
                   <div className="flex items-center justify-between gap-2">
                     <div className="flex items-center gap-2">
                       <Checkbox
@@ -964,10 +1050,54 @@ export function StudioTab() {
           })}
         </div>
 
+        {renderJobId && (
+          <Card>
+            <CardContent className="pt-4 space-y-2">
+              <div className="text-sm font-medium">Final Render Job</div>
+              <div className="text-xs text-muted-foreground">Job: {renderJobId}</div>
+              {renderJobStatus ? (
+                <>
+                  <div className="text-sm">
+                    Status: <span className="font-medium">{renderJobStatus.status}</span>
+                  </div>
+                  <div className="text-xs text-muted-foreground">
+                    Progress: {renderJobStatus.processed_lines}/{renderJobStatus.total_lines}
+                  </div>
+                  {renderJobStatus.error_summary && (
+                    <div className="text-xs text-destructive">{renderJobStatus.error_summary}</div>
+                  )}
+                  {renderJobStatus.lines.some((line) => line.status === 'failed') && (
+                    <div className="text-xs text-muted-foreground">
+                      Failed lines:{' '}
+                      {renderJobStatus.lines
+                        .filter((line) => line.status === 'failed')
+                        .slice(0, 3)
+                        .map((line) => `#${line.order_index + 1}`)
+                        .join(', ')}
+                    </div>
+                  )}
+                  {(renderJobStatus.status === 'completed' ||
+                    renderJobStatus.status === 'partial_failed') && (
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      onClick={() => navigate({ to: '/story-player' })}
+                    >
+                      Open Story Player
+                    </Button>
+                  )}
+                </>
+              ) : (
+                <div className="text-xs text-muted-foreground">Polling render status...</div>
+              )}
+            </CardContent>
+          </Card>
+        )}
+
         <div className="shrink-0 flex items-center justify-end gap-2">
           <Button
             variant="outline"
-            onClick={handleSaveDraft}
+            onClick={() => void handleSaveDraft()}
             disabled={!draftId || updateStudioLines.isPending || !lines.length}
           >
             Save Draft

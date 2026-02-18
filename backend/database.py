@@ -5,11 +5,13 @@ SQLite database ORM using SQLAlchemy.
 from sqlalchemy import create_engine, Column, String, Integer, Float, DateTime, Text, ForeignKey, Boolean
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, Session
+from sqlalchemy.pool import NullPool
 from datetime import datetime
 import uuid
 from pathlib import Path
 
 from . import config
+from .settings import load_settings
 
 Base = declarative_base()
 
@@ -160,6 +162,15 @@ class StudioDraftLine(Base):
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 
+class RuntimeSetting(Base):
+    """Simple key-value runtime settings persisted in DB."""
+    __tablename__ = "runtime_settings"
+
+    key = Column(String, primary_key=True)
+    value = Column(Text, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
 class Project(Base):
     """Audio studio project database model."""
     __tablename__ = "projects"
@@ -208,12 +219,33 @@ def init_db():
     """Initialize database tables."""
     global engine, SessionLocal, _db_path
 
+    settings = load_settings()
     _db_path = config.get_db_path()
     _db_path.parent.mkdir(parents=True, exist_ok=True)
 
+    engine_kwargs = {
+        "connect_args": {
+            "check_same_thread": False,
+            "timeout": settings.db_connect_timeout_seconds,
+        },
+        "pool_pre_ping": True,
+    }
+    if settings.db_use_null_pool:
+        engine_kwargs["poolclass"] = NullPool
+    else:
+        engine_kwargs.update(
+            {
+                "pool_size": settings.db_pool_size,
+                "max_overflow": settings.db_max_overflow,
+                "pool_timeout": settings.db_pool_timeout_seconds,
+                "pool_recycle": settings.db_pool_recycle_seconds,
+                "pool_use_lifo": True,
+            }
+        )
+
     engine = create_engine(
         f"sqlite:///{_db_path}",
-        connect_args={"check_same_thread": False},
+        **engine_kwargs,
     )
 
     SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)

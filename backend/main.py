@@ -23,8 +23,28 @@ import signal
 import os
 from pydantic import ValidationError
 
-from . import database, models, profiles, history, tts, transcribe, config, export_import, channels, stories, studio_drafts, __version__
-from .database import get_db, Generation as DBGeneration, VoiceProfile as DBVoiceProfile
+from . import (
+    database,
+    models,
+    profiles,
+    history,
+    tts,
+    transcribe,
+    config,
+    export_import,
+    channels,
+    stories,
+    studio_drafts,
+    runtime_defaults,
+    __version__,
+)
+from .database import (
+    get_db,
+    Generation as DBGeneration,
+    ProfileSample as DBProfileSample,
+    Story as DBStory,
+    VoiceProfile as DBVoiceProfile,
+)
 from .utils.progress import get_progress_manager
 from .utils.tasks import get_task_manager
 from .utils.cache import clear_voice_prompt_cache
@@ -55,6 +75,18 @@ app.add_middleware(
 
 
 PUBLIC_PATHS = {"/", "/docs", "/openapi.json", "/redoc"}
+
+
+def _new_db_session() -> Session:
+    """Create a short-lived session for routes that stream files."""
+    if database.SessionLocal is None:
+        raise HTTPException(status_code=500, detail="Database not initialized")
+    return database.SessionLocal()
+
+
+def _get_runtime_model_defaults(db: Session) -> models.ModelDefaultsResponse:
+    """Fetch persisted model defaults with env fallback."""
+    return runtime_defaults.get_model_defaults(db, settings=SETTINGS)
 
 
 @app.middleware("http")
@@ -188,14 +220,19 @@ async def runtime_info():
     """Runtime diagnostics useful for remote deployment debugging."""
     backend_type = get_backend_type()
     tts_model = tts.get_tts_model()
+    db = _new_db_session()
+    try:
+        defaults = _get_runtime_model_defaults(db)
+    finally:
+        db.close()
 
     runtime = {
         "backend_type": backend_type,
         "host": SETTINGS.host,
         "port": SETTINGS.port,
         "colab_profile": SETTINGS.colab_profile,
-        "default_model_size": SETTINGS.default_model_size,
-        "default_whisper_model_size": SETTINGS.default_whisper_model_size,
+        "default_model_size": defaults.default_tts_model_size,
+        "default_whisper_model_size": defaults.default_whisper_model_size,
         "torch_cuda_available": torch.cuda.is_available(),
         "torch_cuda_device": torch.cuda.get_device_name(0) if torch.cuda.is_available() else None,
         "torch_mps_available": hasattr(torch.backends, "mps") and torch.backends.mps.is_available(),
@@ -210,6 +247,17 @@ async def runtime_info():
         runtime["vram_allocated_mb"] = torch.cuda.memory_allocated() / 1024 / 1024
 
     return runtime
+
+
+@app.get("/capabilities", response_model=models.CapabilitiesResponse)
+async def get_capabilities():
+    """Return feature flags supported by this backend build."""
+    return models.CapabilitiesResponse(
+        studio_batch_delete=True,
+        model_progress_snapshot=True,
+        query_token_get_auth=True,
+        runtime_defaults=True,
+    )
 
 
 @app.get("/llm/groq/models", response_model=models.GroqModelsResponse)
@@ -398,17 +446,19 @@ async def upload_profile_avatar(
 @app.get("/profiles/{profile_id}/avatar")
 async def get_profile_avatar(
     profile_id: str,
-    db: Session = Depends(get_db),
 ):
     """Get avatar image for a profile."""
-    profile = await profiles.get_profile(profile_id, db)
-    if not profile:
-        raise HTTPException(status_code=404, detail="Profile not found")
+    db = _new_db_session()
+    try:
+        profile = db.query(DBVoiceProfile).filter_by(id=profile_id).first()
+        if not profile:
+            raise HTTPException(status_code=404, detail="Profile not found")
+        if not profile.avatar_path:
+            raise HTTPException(status_code=404, detail="No avatar found for this profile")
+        avatar_path = Path(profile.avatar_path)
+    finally:
+        db.close()
 
-    if not profile.avatar_path:
-        raise HTTPException(status_code=404, detail="No avatar found for this profile")
-
-    avatar_path = Path(profile.avatar_path)
     if not avatar_path.exists():
         raise HTTPException(status_code=404, detail="Avatar file not found")
 
@@ -616,7 +666,8 @@ async def generate_speech(
         # Generate audio
         tts_model = tts.get_tts_model()
         # Load the requested model size if different from current (async to not block)
-        model_size = data.model_size or SETTINGS.default_model_size
+        defaults = _get_runtime_model_defaults(db)
+        model_size = data.model_size or defaults.default_tts_model_size
 
         # Check if model needs to be downloaded first
         model_path = tts_model._get_model_path(model_size)
@@ -868,6 +919,7 @@ async def transcribe_audio(
     file: UploadFile = File(...),
     language: Optional[str] = Form(None),
     model_size: Optional[str] = Form(None),
+    db: Session = Depends(get_db),
 ):
     """Transcribe audio file to text."""
     # Save uploaded file to temporary location
@@ -882,7 +934,10 @@ async def transcribe_audio(
         audio, sr = load_audio(tmp_path)
         duration = len(audio) / sr
 
-        selected_model_size = (model_size or SETTINGS.default_whisper_model_size).strip().lower()
+        defaults = _get_runtime_model_defaults(db)
+        selected_model_size = (
+            model_size or defaults.default_whisper_model_size
+        ).strip().lower()
         if selected_model_size not in {"base", "small", "medium", "large"}:
             raise HTTPException(status_code=400, detail="Invalid whisper model_size")
 
@@ -1073,10 +1128,14 @@ async def generate_studio_preview(
 async def get_studio_preview_audio(
     draft_id: str,
     line_id: str,
-    db: Session = Depends(get_db),
 ):
     """Serve Studio card preview audio file."""
-    audio_path = await studio_drafts.get_studio_line_preview_audio_path(draft_id, line_id, db)
+    db = _new_db_session()
+    try:
+        audio_path = await studio_drafts.get_studio_line_preview_audio_path(draft_id, line_id, db)
+    finally:
+        db.close()
+
     if not audio_path:
         raise HTTPException(status_code=404, detail="Preview audio not found")
     return FileResponse(
@@ -1301,20 +1360,23 @@ async def export_story_audio(
 @app.get("/stories/{story_id}/audio")
 async def get_story_mixed_audio(
     story_id: str,
-    db: Session = Depends(get_db),
 ):
     """Serve persisted story mixed audio file (from render job output)."""
-    story = db.query(database.Story).filter_by(id=story_id).first()
-    if not story:
-        raise HTTPException(status_code=404, detail="Story not found")
+    db = _new_db_session()
+    try:
+        story = db.query(DBStory).filter_by(id=story_id).first()
+        if not story:
+            raise HTTPException(status_code=404, detail="Story not found")
 
-    audio_path = await stories.get_story_audio_path(story_id, db)
-    if not audio_path:
-        raise HTTPException(status_code=404, detail="No persisted mixed audio found for this story")
+        audio_path = await stories.get_story_audio_path(story_id, db)
+        if not audio_path:
+            raise HTTPException(status_code=404, detail="No persisted mixed audio found for this story")
 
-    safe_name = "".join(c for c in story.name if c.isalnum() or c in (" ", "-", "_")).strip()
-    if not safe_name:
-        safe_name = "story"
+        safe_name = "".join(c for c in story.name if c.isalnum() or c in (" ", "-", "_")).strip()
+        if not safe_name:
+            safe_name = "story"
+    finally:
+        db.close()
 
     return FileResponse(
         audio_path,
@@ -1328,13 +1390,17 @@ async def get_story_mixed_audio(
 # ============================================
 
 @app.get("/audio/{generation_id}")
-async def get_audio(generation_id: str, db: Session = Depends(get_db)):
+async def get_audio(generation_id: str):
     """Serve generated audio file."""
-    generation = await history.get_generation(generation_id, db)
-    if not generation:
-        raise HTTPException(status_code=404, detail="Generation not found")
-    
-    audio_path = Path(generation.audio_path)
+    db = _new_db_session()
+    try:
+        generation = db.query(DBGeneration).filter_by(id=generation_id).first()
+        if not generation:
+            raise HTTPException(status_code=404, detail="Generation not found")
+        audio_path = Path(generation.audio_path)
+    finally:
+        db.close()
+
     if not audio_path.exists():
         raise HTTPException(status_code=404, detail="Audio file not found")
     
@@ -1346,15 +1412,17 @@ async def get_audio(generation_id: str, db: Session = Depends(get_db)):
 
 
 @app.get("/samples/{sample_id}")
-async def get_sample_audio(sample_id: str, db: Session = Depends(get_db)):
+async def get_sample_audio(sample_id: str):
     """Serve profile sample audio file."""
-    from .database import ProfileSample as DBProfileSample
-    
-    sample = db.query(DBProfileSample).filter_by(id=sample_id).first()
-    if not sample:
-        raise HTTPException(status_code=404, detail="Sample not found")
-    
-    audio_path = Path(sample.audio_path)
+    db = _new_db_session()
+    try:
+        sample = db.query(DBProfileSample).filter_by(id=sample_id).first()
+        if not sample:
+            raise HTTPException(status_code=404, detail="Sample not found")
+        audio_path = Path(sample.audio_path)
+    finally:
+        db.close()
+
     if not audio_path.exists():
         raise HTTPException(status_code=404, detail="Audio file not found")
     
@@ -1388,6 +1456,56 @@ async def unload_model():
         return {"message": "Model unloaded successfully"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/models/defaults", response_model=models.ModelDefaultsResponse)
+async def get_model_defaults(db: Session = Depends(get_db)):
+    """Get persisted runtime default model sizes."""
+    return _get_runtime_model_defaults(db)
+
+
+@app.put("/models/defaults", response_model=models.ModelDefaultsResponse)
+async def update_model_defaults(
+    data: models.ModelDefaultsUpdateRequest,
+    db: Session = Depends(get_db),
+):
+    """Update persisted runtime default model sizes."""
+    return runtime_defaults.update_model_defaults(db, data)
+
+
+@app.get("/models/runtime", response_model=models.RuntimeModelsResponse)
+async def get_runtime_models(db: Session = Depends(get_db)):
+    """Get currently loaded runtime models and configured defaults."""
+    return runtime_defaults.get_runtime_models(db, settings=SETTINGS)
+
+
+@app.post("/models/activate")
+async def activate_model(data: models.ModelDownloadRequest):
+    """Load a downloaded model into memory and make it active for runtime."""
+    model_name = data.model_name
+    try:
+        if model_name == "qwen-tts-1.7B":
+            await tts.get_tts_model().load_model_async("1.7B")
+            return {"message": "Model qwen-tts-1.7B activated"}
+        if model_name == "qwen-tts-0.6B":
+            await tts.get_tts_model().load_model_async("0.6B")
+            return {"message": "Model qwen-tts-0.6B activated"}
+        if model_name == "whisper-base":
+            await transcribe.get_whisper_model().load_model_async("base")
+            return {"message": "Model whisper-base activated"}
+        if model_name == "whisper-small":
+            await transcribe.get_whisper_model().load_model_async("small")
+            return {"message": "Model whisper-small activated"}
+        if model_name == "whisper-medium":
+            await transcribe.get_whisper_model().load_model_async("medium")
+            return {"message": "Model whisper-medium activated"}
+        if model_name == "whisper-large":
+            await transcribe.get_whisper_model().load_model_async("large")
+            return {"message": "Model whisper-large activated"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e)) from e
+
+    raise HTTPException(status_code=400, detail=f"Unknown model: {model_name}")
 
 
 @app.get("/models/progress/{model_name}")
@@ -1839,77 +1957,103 @@ async def clear_cache():
 # TASK MANAGEMENT
 # ============================================
 
-@app.get("/tasks/active", response_model=models.ActiveTasksResponse)
-async def get_active_tasks():
-    """Return all currently active downloads and generations."""
+
+def _collect_active_task_payload() -> tuple[
+    List[models.ActiveDownloadTask],
+    List[models.ActiveGenerationTask],
+    List[models.ActiveStoryRenderTask],
+]:
     task_manager = get_task_manager()
     progress_manager = get_progress_manager()
-    
-    # Get active downloads from both task manager and progress manager
-    # Task manager tracks which downloads are active
-    # Progress manager has the actual progress data
-    active_downloads = []
+
+    # Get active downloads from both task manager and progress manager.
+    active_downloads: List[models.ActiveDownloadTask] = []
     task_manager_downloads = task_manager.get_active_downloads()
     progress_active = progress_manager.get_all_active()
-    
-    # Combine data from both sources
+
     download_map = {task.model_name: task for task in task_manager_downloads}
     progress_map = {p["model_name"]: p for p in progress_active}
-    
-    # Create unified list
+
     all_model_names = set(download_map.keys()) | set(progress_map.keys())
     for model_name in all_model_names:
         task = download_map.get(model_name)
         progress = progress_map.get(model_name)
-        
+
         if task:
-            active_downloads.append(models.ActiveDownloadTask(
-                model_name=model_name,
-                status=task.status,
-                started_at=task.started_at,
-            ))
+            active_downloads.append(
+                models.ActiveDownloadTask(
+                    model_name=model_name,
+                    status=task.status,
+                    started_at=task.started_at,
+                )
+            )
         elif progress:
-            # Progress exists but no task - create from progress data
             timestamp_str = progress.get("timestamp")
             if timestamp_str:
                 try:
-                    started_at = datetime.fromisoformat(timestamp_str.replace('Z', '+00:00'))
+                    started_at = datetime.fromisoformat(timestamp_str.replace("Z", "+00:00"))
                 except (ValueError, AttributeError):
                     started_at = datetime.utcnow()
             else:
                 started_at = datetime.utcnow()
-            
-            active_downloads.append(models.ActiveDownloadTask(
-                model_name=model_name,
-                status=progress.get("status", "downloading"),
-                started_at=started_at,
-            ))
-    
-    # Get active generations
-    active_generations = []
-    for gen_task in task_manager.get_active_generations():
-        active_generations.append(models.ActiveGenerationTask(
-            task_id=gen_task.task_id,
-            profile_id=gen_task.profile_id,
-            text_preview=gen_task.text_preview,
-            started_at=gen_task.started_at,
-        ))
 
-    active_story_renders = []
+            active_downloads.append(
+                models.ActiveDownloadTask(
+                    model_name=model_name,
+                    status=progress.get("status", "downloading"),
+                    started_at=started_at,
+                )
+            )
+
+    active_generations: List[models.ActiveGenerationTask] = []
+    for gen_task in task_manager.get_active_generations():
+        active_generations.append(
+            models.ActiveGenerationTask(
+                task_id=gen_task.task_id,
+                profile_id=gen_task.profile_id,
+                text_preview=gen_task.text_preview,
+                started_at=gen_task.started_at,
+            )
+        )
+
+    active_story_renders: List[models.ActiveStoryRenderTask] = []
     for render_task in task_manager.get_active_story_renders():
-        active_story_renders.append(models.ActiveStoryRenderTask(
-            job_id=render_task.job_id,
-            story_id=render_task.story_id,
-            status=render_task.status,
-            total_lines=render_task.total_lines,
-            processed_lines=render_task.processed_lines,
-            started_at=render_task.started_at,
-        ))
-    
+        active_story_renders.append(
+            models.ActiveStoryRenderTask(
+                job_id=render_task.job_id,
+                story_id=render_task.story_id,
+                status=render_task.status,
+                total_lines=render_task.total_lines,
+                processed_lines=render_task.processed_lines,
+                started_at=render_task.started_at,
+            )
+        )
+
+    return active_downloads, active_generations, active_story_renders
+
+
+@app.get("/tasks/active", response_model=models.ActiveTasksResponse)
+async def get_active_tasks():
+    """Return all currently active downloads and generations."""
+    active_downloads, active_generations, active_story_renders = _collect_active_task_payload()
+
     return models.ActiveTasksResponse(
         downloads=active_downloads,
         generations=active_generations,
         story_renders=active_story_renders,
+    )
+
+
+@app.get("/tasks/summary", response_model=models.ActiveTasksSummaryResponse)
+async def get_active_tasks_summary():
+    """Compact active task summary suitable for lightweight polling."""
+    active_downloads, active_generations, active_story_renders = _collect_active_task_payload()
+    return models.ActiveTasksSummaryResponse(
+        downloads_active=len(active_downloads),
+        generations_active=len(active_generations),
+        story_renders_active=len(active_story_renders),
+        has_active_tasks=bool(active_downloads or active_generations or active_story_renders),
+        downloading_models=sorted([task.model_name for task in active_downloads]),
     )
 
 

@@ -130,6 +130,37 @@ export interface ActiveTasksResponse {
   story_renders?: ActiveStoryRenderTask[];
 }
 
+export interface ActiveTasksSummaryResponse {
+  downloads_active: number;
+  generations_active: number;
+  story_renders_active: number;
+  has_active_tasks: boolean;
+  downloading_models: string[];
+}
+
+export interface CapabilitiesResponse {
+  studio_batch_delete: boolean;
+  model_progress_snapshot: boolean;
+  query_token_get_auth: boolean;
+  runtime_defaults: boolean;
+}
+
+export interface ModelDefaultsResponse {
+  default_tts_model_size: '1.7B' | '0.6B';
+  default_whisper_model_size: 'base' | 'small' | 'medium' | 'large';
+}
+
+export interface ModelDefaultsUpdateRequest {
+  default_tts_model_size: '1.7B' | '0.6B';
+  default_whisper_model_size: 'base' | 'small' | 'medium' | 'large';
+}
+
+export interface RuntimeModelsResponse {
+  tts_loaded_model_size?: '1.7B' | '0.6B';
+  whisper_loaded_model_size?: 'base' | 'small' | 'medium' | 'large';
+  defaults: ModelDefaultsResponse;
+}
+
 export interface StoryCreate {
   name: string;
   description?: string;
@@ -245,6 +276,37 @@ export interface StoryRenderJobResponse {
   story_id: string;
   status: string;
   total_lines: number;
+}
+
+export interface StoryRenderLineStatus {
+  id: string;
+  order_index: number;
+  source_generation_id: string;
+  generated_generation_id?: string;
+  character_name: string;
+  profile_id: string;
+  text: string;
+  emotion: EmotionType;
+  emotion_intensity: number;
+  resolved_instruct?: string;
+  track: number;
+  start_time_ms: number;
+  status: string;
+  error_message?: string;
+}
+
+export interface StoryRenderStatusResponse {
+  job_id: string;
+  story_id: string;
+  status: 'queued' | 'running' | 'completed' | 'failed' | 'partial_failed';
+  total_lines: number;
+  processed_lines: number;
+  error_summary?: string;
+  output_audio_path?: string;
+  created_at: string;
+  updated_at: string;
+  completed_at?: string;
+  lines: StoryRenderLineStatus[];
 }
 
 export interface GroqModelsResponse {

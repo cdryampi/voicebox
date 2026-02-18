@@ -9,50 +9,84 @@ import { useServerStore } from '@/stores/serverStore';
 interface ModelProgressProps {
   modelName: string;
   displayName: string;
-  /** Only connect to SSE when actively downloading - prevents connection exhaustion */
+  /** Only poll when actively downloading. */
   isDownloading?: boolean;
 }
 
-export function ModelProgress({ modelName, displayName, isDownloading = false }: ModelProgressProps) {
+export function ModelProgress({
+  modelName,
+  displayName,
+  isDownloading = false,
+}: ModelProgressProps) {
   const [progress, setProgress] = useState<ModelProgressType | null>(null);
   const serverUrl = useServerStore((state) => state.serverUrl);
 
   useEffect(() => {
-    // IMPORTANT: Only connect to SSE when this specific model is downloading
-    // Opening SSE connections for all models exhausts HTTP/1.1 connection limits (6 per origin)
-    // which causes other fetches (like the download trigger) to be queued/blocked
     if (!serverUrl || !isDownloading) {
       return;
     }
 
-    console.log(`[ModelProgress] Connecting SSE for ${modelName}`);
+    let cancelled = false;
+    let intervalId: number | null = null;
 
-    // Subscribe to progress updates via Server-Sent Events
-    const eventSource = new EventSource(apiClient.getModelProgressSseUrl(modelName));
-
-    eventSource.onmessage = (event) => {
-      try {
-        const data = JSON.parse(event.data) as ModelProgressType;
-        setProgress(data);
-
-        // Close connection if complete or error
-        if (data.status === 'complete' || data.status === 'error') {
-          console.log(`[ModelProgress] Download ${data.status} for ${modelName}, closing SSE`);
-          eventSource.close();
+    const applyProgress = (data: ModelProgressType) => {
+      if (cancelled) return;
+      setProgress(data);
+      if (data.status === 'complete' || data.status === 'error') {
+        if (intervalId !== null) {
+          window.clearInterval(intervalId);
+          intervalId = null;
         }
-      } catch (error) {
-        console.error('Error parsing progress event:', error);
       }
     };
 
-    eventSource.onerror = (error) => {
-      console.error(`[ModelProgress] SSE error for ${modelName}:`, error);
-      eventSource.close();
+    const poll = async () => {
+      if (cancelled) return;
+      try {
+        const data = await apiClient.getModelProgressSnapshot(modelName);
+        if (data) {
+          applyProgress(data);
+          return;
+        }
+
+        const modelStatus = await apiClient.getModelStatus();
+        const model = modelStatus.models.find((entry) => entry.model_name === modelName);
+        if (model?.downloaded || model?.loaded) {
+          applyProgress({
+            model_name: modelName,
+            current: 1,
+            total: 1,
+            progress: 100,
+            status: 'complete',
+            filename: undefined,
+            timestamp: new Date().toISOString(),
+          });
+        } else if (model?.downloading) {
+          applyProgress({
+            model_name: modelName,
+            current: 0,
+            total: 0,
+            progress: 0,
+            status: 'downloading',
+            filename: 'Downloading...',
+            timestamp: new Date().toISOString(),
+          });
+        }
+      } catch {
+        // Keep polling; transient errors are common with remote tunnels.
+      }
     };
 
+    void poll();
+    intervalId = window.setInterval(() => {
+      void poll();
+    }, 1500);
+
     return () => {
-      console.log(`[ModelProgress] Cleanup - closing SSE for ${modelName}`);
-      eventSource.close();
+      cancelled = true;
+      if (intervalId !== null) {
+        window.clearInterval(intervalId);
+      }
     };
   }, [serverUrl, modelName, isDownloading]);
 

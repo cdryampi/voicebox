@@ -5,11 +5,17 @@ import { MainEditor } from '@/components/MainEditor/MainEditor';
 import { ModelsTab } from '@/components/ModelsTab/ModelsTab';
 import { ServerTab } from '@/components/ServerTab/ServerTab';
 import { Sidebar } from '@/components/Sidebar';
+import { StudioTab } from '@/components/StudioTab/StudioTab';
+import { StoryPlayerTab } from '@/components/StoryPlayerTab/StoryPlayerTab';
 import { StoriesTab } from '@/components/StoriesTab/StoriesTab';
 import { Toaster } from '@/components/ui/toaster';
+import { apiClient } from '@/lib/api/client';
 import { VoicesTab } from '@/components/VoicesTab/VoicesTab';
 import { useModelDownloadToast } from '@/lib/hooks/useModelDownloadToast';
 import { MODEL_DISPLAY_NAMES, useRestoreActiveTasks } from '@/lib/hooks/useRestoreActiveTasks';
+import { useModelPreferencesStore } from '@/stores/modelPreferencesStore';
+import { useServerStore } from '@/stores/serverStore';
+import { useEffect } from 'react';
 // Simple platform check that works in both web and Tauri
 const isMacOS = () => navigator.platform.toLowerCase().includes('mac');
 
@@ -17,6 +23,31 @@ const isMacOS = () => navigator.platform.toLowerCase().includes('mac');
 function RootLayout() {
   // Monitor active downloads/generations and show toasts for them
   const activeDownloads = useRestoreActiveTasks();
+  const serverUrl = useServerStore((state) => state.serverUrl);
+  const setDefaultTtsModelSize = useModelPreferencesStore((state) => state.setDefaultTtsModelSize);
+  const setDefaultWhisperModelSize = useModelPreferencesStore(
+    (state) => state.setDefaultWhisperModelSize,
+  );
+
+  useEffect(() => {
+    let cancelled = false;
+    const syncDefaults = async () => {
+      try {
+        const capabilities = await apiClient.getCapabilities(true);
+        if (!capabilities.runtime_defaults) return;
+        const defaults = await apiClient.getModelDefaults();
+        if (cancelled) return;
+        setDefaultTtsModelSize(defaults.default_tts_model_size);
+        setDefaultWhisperModelSize(defaults.default_whisper_model_size);
+      } catch {
+        // Ignore transient remote connectivity/capability errors.
+      }
+    };
+    void syncDefaults();
+    return () => {
+      cancelled = true;
+    };
+  }, [serverUrl, setDefaultTtsModelSize, setDefaultWhisperModelSize]);
 
   return (
     <AppFrame>
@@ -86,6 +117,20 @@ const storiesRoute = createRoute({
   component: StoriesTab,
 });
 
+// Studio route
+const studioRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: '/studio',
+  component: StudioTab,
+});
+
+// Story player route
+const storyPlayerRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: '/story-player',
+  component: StoryPlayerTab,
+});
+
 // Voices route
 const voicesRoute = createRoute({
   getParentRoute: () => rootRoute,
@@ -117,7 +162,9 @@ const serverRoute = createRoute({
 // Route tree
 const routeTree = rootRoute.addChildren([
   indexRoute,
+  studioRoute,
   storiesRoute,
+  storyPlayerRoute,
   voicesRoute,
   audioRoute,
   modelsRoute,

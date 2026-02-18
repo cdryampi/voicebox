@@ -1,4 +1,5 @@
-import { useMutation, useQueryClient } from '@tanstack/react-query';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { useEffect } from 'react';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import {
@@ -21,6 +22,43 @@ export function ModelDefaults() {
   const setDefaultWhisperModelSize = useModelPreferencesStore(
     (state) => state.setDefaultWhisperModelSize,
   );
+
+  const defaultsQuery = useQuery({
+    queryKey: ['modelDefaults'],
+    queryFn: () => apiClient.getModelDefaults(),
+    staleTime: 30000,
+  });
+
+  useEffect(() => {
+    if (!defaultsQuery.data) return;
+    setDefaultTtsModelSize(defaultsQuery.data.default_tts_model_size);
+    setDefaultWhisperModelSize(defaultsQuery.data.default_whisper_model_size);
+  }, [defaultsQuery.data, setDefaultTtsModelSize, setDefaultWhisperModelSize]);
+
+  const saveDefaults = useMutation({
+    mutationFn: () =>
+      apiClient.updateModelDefaults({
+        default_tts_model_size: defaultTtsModelSize,
+        default_whisper_model_size: defaultWhisperModelSize,
+      }),
+    onSuccess: async (saved) => {
+      setDefaultTtsModelSize(saved.default_tts_model_size);
+      setDefaultWhisperModelSize(saved.default_whisper_model_size);
+      toast({
+        title: 'Defaults saved',
+        description: 'Server defaults updated successfully.',
+      });
+      await queryClient.invalidateQueries({ queryKey: ['modelDefaults'] });
+      await queryClient.invalidateQueries({ queryKey: ['runtimeModels'] });
+    },
+    onError: (error) => {
+      toast({
+        title: 'Failed to save defaults',
+        description: error instanceof Error ? error.message : 'Unknown error',
+        variant: 'destructive',
+      });
+    },
+  });
 
   const loadDefaults = useMutation({
     mutationFn: async () => {
@@ -52,6 +90,11 @@ export function ModelDefaults() {
         </CardDescription>
       </CardHeader>
       <CardContent className="grid grid-cols-1 md:grid-cols-3 gap-3">
+        {defaultsQuery.isError && (
+          <div className="md:col-span-3 text-sm text-muted-foreground">
+            Runtime defaults are not available on this backend version.
+          </div>
+        )}
         <div className="space-y-1">
           <div className="text-xs text-muted-foreground">Voice Generation</div>
           <Select
@@ -89,14 +132,24 @@ export function ModelDefaults() {
         </div>
 
         <div className="flex items-end">
-          <Button
-            onClick={() => loadDefaults.mutate()}
-            variant="outline"
-            className="w-full"
-            disabled={loadDefaults.isPending}
-          >
-            {loadDefaults.isPending ? 'Loading...' : 'Load Defaults'}
-          </Button>
+          <div className="w-full space-y-2">
+            <Button
+              onClick={() => saveDefaults.mutate()}
+              variant="default"
+              className="w-full"
+              disabled={saveDefaults.isPending || defaultsQuery.isLoading || defaultsQuery.isError}
+            >
+              {saveDefaults.isPending ? 'Saving...' : 'Save Defaults'}
+            </Button>
+            <Button
+              onClick={() => loadDefaults.mutate()}
+              variant="outline"
+              className="w-full"
+              disabled={loadDefaults.isPending}
+            >
+              {loadDefaults.isPending ? 'Loading...' : 'Preload Defaults'}
+            </Button>
+          </div>
         </div>
       </CardContent>
     </Card>

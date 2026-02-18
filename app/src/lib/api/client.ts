@@ -2,6 +2,8 @@ import type { LanguageCode } from '@/lib/constants/languages';
 import { useServerStore } from '@/stores/serverStore';
 import type {
   ActiveTasksResponse,
+  ActiveTasksSummaryResponse,
+  CapabilitiesResponse,
   GenerationRequest,
   GenerationResponse,
   GroqModelsResponse,
@@ -10,7 +12,10 @@ import type {
   HistoryQuery,
   HistoryResponse,
   ModelDownloadRequest,
+  ModelDefaultsResponse,
+  ModelDefaultsUpdateRequest,
   ModelProgress,
+  RuntimeModelsResponse,
   ModelStatusListResponse,
   ProfileSampleResponse,
   StoryComposeWithGroqRequest,
@@ -24,6 +29,7 @@ import type {
   StoryItemSplit,
   StoryItemTrim,
   StoryRenderJobResponse,
+  StoryRenderStatusResponse,
   StoryResponse,
   StudioDraftCreateRequest,
   StudioDraftDetailResponse,
@@ -42,10 +48,29 @@ class ApiClient {
   private static readonly NGROK_BYPASS_HEADER = 'ngrok-skip-browser-warning';
   private supportsProgressSnapshot: boolean | null = null;
   private supportsStudioBatchDelete: boolean | null = null;
+  private capabilitiesCache: CapabilitiesResponse | null = null;
+  private capabilitiesBaseUrl: string | null = null;
 
   private getBaseUrl(): string {
     const serverUrl = useServerStore.getState().serverUrl;
     return serverUrl;
+  }
+
+  private ensureConnectionCacheFresh(): void {
+    const baseUrl = this.getBaseUrl();
+    if (this.capabilitiesBaseUrl && this.capabilitiesBaseUrl !== baseUrl) {
+      this.supportsProgressSnapshot = null;
+      this.supportsStudioBatchDelete = null;
+      this.capabilitiesCache = null;
+    }
+    this.capabilitiesBaseUrl = baseUrl;
+  }
+
+  resetConnectionCaches(): void {
+    this.supportsProgressSnapshot = null;
+    this.supportsStudioBatchDelete = null;
+    this.capabilitiesCache = null;
+    this.capabilitiesBaseUrl = this.getBaseUrl();
   }
 
   private getApiKey(): string {
@@ -129,6 +154,7 @@ class ApiClient {
   }
 
   private async request<T>(endpoint: string, options?: RequestInit): Promise<T> {
+    this.ensureConnectionCacheFresh();
     const url = `${this.getBaseUrl()}${endpoint}`;
     const response = await fetch(url, {
       ...options,
@@ -166,6 +192,36 @@ class ApiClient {
       return JSON.parse(payload) as T;
     } catch {
       throw new Error(`Expected JSON response from ${endpoint}, but received non-JSON content.`);
+    }
+  }
+
+  private getFallbackCapabilities(): CapabilitiesResponse {
+    return {
+      studio_batch_delete: this.supportsStudioBatchDelete !== false,
+      model_progress_snapshot: this.supportsProgressSnapshot !== false,
+      query_token_get_auth: true,
+      runtime_defaults: false,
+    };
+  }
+
+  async getCapabilities(force = false): Promise<CapabilitiesResponse> {
+    this.ensureConnectionCacheFresh();
+    if (!force && this.capabilitiesCache) {
+      return this.capabilitiesCache;
+    }
+
+    try {
+      const caps = await this.request<CapabilitiesResponse>('/capabilities');
+      this.capabilitiesCache = caps;
+      return caps;
+    } catch (error) {
+      const status = (error as { status?: number })?.status;
+      if (status === 404) {
+        const fallback = this.getFallbackCapabilities();
+        this.capabilitiesCache = fallback;
+        return fallback;
+      }
+      throw error;
     }
   }
 
@@ -416,7 +472,8 @@ class ApiClient {
   }
 
   async getModelProgressSnapshot(modelName: string): Promise<ModelProgress | null> {
-    if (this.supportsProgressSnapshot === false) {
+    const capabilities = await this.getCapabilities().catch(() => this.getFallbackCapabilities());
+    if (!capabilities.model_progress_snapshot || this.supportsProgressSnapshot === false) {
       return null;
     }
 
@@ -431,6 +488,12 @@ class ApiClient {
     if (!response.ok) {
       if (response.status === 404) {
         this.supportsProgressSnapshot = false;
+        if (this.capabilitiesCache) {
+          this.capabilitiesCache = {
+            ...this.capabilitiesCache,
+            model_progress_snapshot: false,
+          };
+        }
         return null;
       }
 
@@ -493,6 +556,28 @@ class ApiClient {
     return this.request<ModelStatusListResponse>('/models/status');
   }
 
+  async getModelDefaults(): Promise<ModelDefaultsResponse> {
+    return this.request<ModelDefaultsResponse>('/models/defaults');
+  }
+
+  async updateModelDefaults(data: ModelDefaultsUpdateRequest): Promise<ModelDefaultsResponse> {
+    return this.request<ModelDefaultsResponse>('/models/defaults', {
+      method: 'PUT',
+      body: JSON.stringify(data),
+    });
+  }
+
+  async getRuntimeModels(): Promise<RuntimeModelsResponse> {
+    return this.request<RuntimeModelsResponse>('/models/runtime');
+  }
+
+  async activateModel(modelName: string): Promise<{ message: string }> {
+    return this.request<{ message: string }>('/models/activate', {
+      method: 'POST',
+      body: JSON.stringify({ model_name: modelName }),
+    });
+  }
+
   async triggerModelDownload(modelName: string): Promise<{ message: string }> {
     console.log(
       '[API] triggerModelDownload called for:',
@@ -517,6 +602,10 @@ class ApiClient {
   // Task Management
   async getActiveTasks(): Promise<ActiveTasksResponse> {
     return this.request<ActiveTasksResponse>('/tasks/active');
+  }
+
+  async getTasksSummary(): Promise<ActiveTasksSummaryResponse> {
+    return this.request<ActiveTasksSummaryResponse>('/tasks/summary');
   }
 
   // Audio Channels
@@ -595,6 +684,10 @@ class ApiClient {
   // Stories
   async listStories(): Promise<StoryResponse[]> {
     return this.request<StoryResponse[]>('/stories');
+  }
+
+  async getStoryRenderStatus(jobId: string): Promise<StoryRenderStatusResponse> {
+    return this.request<StoryRenderStatusResponse>(`/stories/jobs/${jobId}`);
   }
 
   async createStory(data: StoryCreate): Promise<StoryResponse> {
@@ -766,7 +859,8 @@ class ApiClient {
       });
     };
 
-    if (this.supportsStudioBatchDelete === false) {
+    const capabilities = await this.getCapabilities().catch(() => this.getFallbackCapabilities());
+    if (!capabilities.studio_batch_delete || this.supportsStudioBatchDelete === false) {
       return emulateDeleteWithUpdate();
     }
 
@@ -784,6 +878,12 @@ class ApiClient {
         error instanceof Error ? error.message.toLowerCase() : String(error).toLowerCase();
       if (status === 404 || message.includes('not found') || message.includes('404')) {
         this.supportsStudioBatchDelete = false;
+        if (this.capabilitiesCache) {
+          this.capabilitiesCache = {
+            ...this.capabilitiesCache,
+            studio_batch_delete: false,
+          };
+        }
         return emulateDeleteWithUpdate();
       }
       throw error;

@@ -149,6 +149,33 @@ class ModelDownloadRequest(BaseModel):
     model_name: str
 
 
+class ModelDefaultsResponse(BaseModel):
+    """Runtime default model sizes used when requests omit model_size."""
+    default_tts_model_size: Literal["1.7B", "0.6B"]
+    default_whisper_model_size: Literal["base", "small", "medium", "large"]
+
+
+class ModelDefaultsUpdateRequest(BaseModel):
+    """Update runtime default model sizes."""
+    default_tts_model_size: Literal["1.7B", "0.6B"]
+    default_whisper_model_size: Literal["base", "small", "medium", "large"]
+
+
+class RuntimeModelsResponse(BaseModel):
+    """Current runtime loaded models and configured defaults."""
+    tts_loaded_model_size: Optional[Literal["1.7B", "0.6B"]] = None
+    whisper_loaded_model_size: Optional[Literal["base", "small", "medium", "large"]] = None
+    defaults: ModelDefaultsResponse
+
+
+class CapabilitiesResponse(BaseModel):
+    """Feature flags supported by this backend build."""
+    studio_batch_delete: bool = True
+    model_progress_snapshot: bool = True
+    query_token_get_auth: bool = True
+    runtime_defaults: bool = True
+
+
 class ActiveDownloadTask(BaseModel):
     """Response model for active download task."""
     model_name: str
@@ -179,6 +206,15 @@ class ActiveTasksResponse(BaseModel):
     downloads: List[ActiveDownloadTask]
     generations: List[ActiveGenerationTask]
     story_renders: List[ActiveStoryRenderTask] = []
+
+
+class ActiveTasksSummaryResponse(BaseModel):
+    """Compact active task summary for lightweight polling."""
+    downloads_active: int
+    generations_active: int
+    story_renders_active: int
+    has_active_tasks: bool
+    downloading_models: List[str] = []
 
 
 class AudioChannelCreate(BaseModel):

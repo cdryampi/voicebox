@@ -16,6 +16,7 @@ import {
 import { Input } from '@/components/ui/input';
 import { Checkbox } from '@/components/ui/checkbox';
 import { useToast } from '@/components/ui/use-toast';
+import { apiClient } from '@/lib/api/client';
 import { useServerStore } from '@/stores/serverStore';
 import { usePlatform } from '@/platform/PlatformContext';
 
@@ -51,14 +52,26 @@ export function ConnectionForm() {
 
   const { isDirty } = form.formState;
 
-  function onSubmit(data: ConnectionFormValues) {
+  async function onSubmit(data: ConnectionFormValues) {
     setServerUrl(data.serverUrl);
     setApiKey((data.apiKey || '').trim());
+    apiClient.resetConnectionCaches();
     form.reset(data); // Reset form state after successful submission
-    toast({
-      title: 'Server URL updated',
-      description: `Connected to ${data.serverUrl}`,
-    });
+    try {
+      await apiClient.getCapabilities(true);
+      toast({
+        title: 'Server URL updated',
+        description: `Connected to ${data.serverUrl}`,
+      });
+    } catch (error) {
+      toast({
+        title: 'Connection updated',
+        description:
+          error instanceof Error
+            ? `Saved server, but capability check failed: ${error.message}`
+            : 'Saved server URL and API key.',
+      });
+    }
   }
 
   return (

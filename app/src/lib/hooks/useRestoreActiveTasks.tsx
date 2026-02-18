@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { apiClient } from '@/lib/api/client';
-import type { ActiveDownloadTask } from '@/lib/api/types';
+import type { ActiveDownloadTask, ActiveTasksSummaryResponse } from '@/lib/api/types';
 import { useGenerationStore } from '@/stores/generationStore';
 
-// Polling interval in milliseconds
-const POLL_INTERVAL = 2000;
+const ACTIVE_POLL_INTERVAL = 2000;
+const IDLE_POLL_INTERVAL = 8000;
+const HIDDEN_POLL_INTERVAL = 30000;
 
 /**
  * Hook to monitor active tasks (downloads and generations).
@@ -18,42 +19,58 @@ export function useRestoreActiveTasks() {
   const setIsGenerating = useGenerationStore((state) => state.setIsGenerating);
   const setActiveGenerationId = useGenerationStore((state) => state.setActiveGenerationId);
   const consecutiveFailuresRef = useRef(0);
-
-  // Track which downloads we've seen to detect new ones
-  const seenDownloadsRef = useRef<Set<string>>(new Set());
+  const hasActiveTasksRef = useRef(false);
 
   const fetchActiveTasks = useCallback(async () => {
     try {
-      const tasks = await apiClient.getActiveTasks();
+      let summary: ActiveTasksSummaryResponse;
+      try {
+        summary = await apiClient.getTasksSummary();
+      } catch (error) {
+        const status = (error as { status?: number })?.status;
+        if (status !== 404) {
+          throw error;
+        }
+        // Backward compatibility for older backends without /tasks/summary.
+        const legacyTasks = await apiClient.getActiveTasks();
+        consecutiveFailuresRef.current = 0;
+        hasActiveTasksRef.current = !!(legacyTasks.downloads.length || legacyTasks.generations.length);
+        if (legacyTasks.generations.length > 0) {
+          setIsGenerating(true);
+          setActiveGenerationId(legacyTasks.generations[0].task_id);
+        } else {
+          const currentId = useGenerationStore.getState().activeGenerationId;
+          if (currentId) {
+            setIsGenerating(false);
+            setActiveGenerationId(null);
+          }
+        }
+        setActiveDownloads(legacyTasks.downloads);
+        return true;
+      }
       consecutiveFailuresRef.current = 0;
+      hasActiveTasksRef.current = summary.has_active_tasks;
 
-      // Update generation state
-      if (tasks.generations.length > 0) {
-        setIsGenerating(true);
-        setActiveGenerationId(tasks.generations[0].task_id);
-      } else {
-        // Only clear if we were tracking a generation
+      if (!summary.has_active_tasks) {
+        setActiveDownloads([]);
         const currentId = useGenerationStore.getState().activeGenerationId;
         if (currentId) {
           setIsGenerating(false);
           setActiveGenerationId(null);
         }
+        return true;
       }
 
-      // Update active downloads
-      // Keep track of all active downloads (including new ones)
-      const currentDownloadNames = new Set(tasks.downloads.map((d) => d.model_name));
-
-      // Remove completed downloads from our seen set
-      for (const name of seenDownloadsRef.current) {
-        if (!currentDownloadNames.has(name)) {
-          seenDownloadsRef.current.delete(name);
+      const tasks = await apiClient.getActiveTasks();
+      if (tasks.generations.length > 0) {
+        setIsGenerating(true);
+        setActiveGenerationId(tasks.generations[0].task_id);
+      } else {
+        const currentId = useGenerationStore.getState().activeGenerationId;
+        if (currentId) {
+          setIsGenerating(false);
+          setActiveGenerationId(null);
         }
-      }
-
-      // Add new downloads to seen set
-      for (const download of tasks.downloads) {
-        seenDownloadsRef.current.add(download.model_name);
       }
 
       setActiveDownloads(tasks.downloads);
@@ -79,10 +96,17 @@ export function useRestoreActiveTasks() {
           scheduleNext(5 * 60 * 1000);
           return;
         }
+        const visibility = document.visibilityState;
+        const baseInterval =
+          visibility === 'hidden'
+            ? HIDDEN_POLL_INTERVAL
+            : hasActiveTasksRef.current
+              ? ACTIVE_POLL_INTERVAL
+              : IDLE_POLL_INTERVAL;
         const backoff =
           !ok && consecutiveFailuresRef.current >= 3
-            ? Math.min(30000, POLL_INTERVAL * consecutiveFailuresRef.current)
-            : POLL_INTERVAL;
+            ? Math.min(30000, baseInterval * consecutiveFailuresRef.current)
+            : baseInterval;
         scheduleNext(backoff);
       }, delayMs);
     };

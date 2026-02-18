@@ -13,23 +13,23 @@ interface AppFrameProps {
 
 export function AppFrame({ children }: AppFrameProps) {
   const routerState = useRouterState();
+  const isStudioRoute = routerState.location.pathname === '/studio';
   const isStoriesRoute = routerState.location.pathname === '/stories';
+  const isStoryPlayerRoute = routerState.location.pathname === '/story-player';
   
   const selectedStoryId = useStoryStore((state) => state.selectedStoryId);
   const { data: story } = useStory(selectedStoryId);
   
-  // Show track editor when on stories route with a selected story that has items
-  const showTrackEditor = isStoriesRoute && selectedStoryId && story && story.items.length > 0;
+  // Story timeline editor now lives in Story Player tab, not Stories tab.
+  const showTrackEditor = isStoryPlayerRoute && selectedStoryId && story && story.items.length > 0;
+  const showAudioPlayer = !isStudioRoute && !isStoriesRoute && !isStoryPlayerRoute && !showTrackEditor;
 
   return (
     <div className={cn('h-screen bg-background flex flex-col overflow-hidden', TOP_SAFE_AREA_PADDING)}>
       <TitleBarDragRegion />
       {children}
-      {showTrackEditor ? (
-        <StoryTrackEditor storyId={story.id} items={story.items} />
-      ) : (
-        <AudioPlayer />
-      )}
+      {showTrackEditor && <StoryTrackEditor storyId={story.id} items={story.items} />}
+      {showAudioPlayer && <AudioPlayer />}
     </div>
   );
 }

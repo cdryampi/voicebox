@@ -23,6 +23,7 @@ class PyTorchTTSBackend:
         self.model = None
         self.model_size = model_size
         self.device = self._get_device()
+        self.torch_dtype = self._get_torch_dtype()
         self._current_model_size = None
     
     def _get_device(self) -> str:
@@ -33,6 +34,13 @@ class PyTorchTTSBackend:
             # MPS can have issues, use CPU for stability
             return "cpu"
         return "cpu"
+
+    def _get_torch_dtype(self):
+        """Choose stable dtype for current device."""
+        if self.device == "cuda":
+            # T4 and many CUDA cards are significantly more stable with fp16 than bf16.
+            return torch.float16
+        return torch.float32
     
     def is_loaded(self) -> bool:
         """Check if model is loaded."""
@@ -169,7 +177,7 @@ class PyTorchTTSBackend:
                 self.model = Qwen3TTSModel.from_pretrained(
                     model_path,
                     device_map=self.device,
-                    torch_dtype=torch.float32 if self.device == "cpu" else torch.bfloat16,
+                    torch_dtype=self.torch_dtype,
                 )
             finally:
                 # Exit the patch context
