@@ -173,6 +173,32 @@ def _extract_error_message_and_code(detail: object) -> tuple[str, Optional[str]]
     return str(detail), None
 
 
+async def _read_upload_bytes_or_400(
+    file: UploadFile,
+    *,
+    max_size: Optional[int] = None,
+    empty_detail: str = "Uploaded file is empty",
+) -> bytes:
+    """Read uploaded file bytes safely and reject empty/oversized payloads."""
+    try:
+        await file.seek(0)
+    except Exception:
+        # Best effort; some UploadFile implementations may not support seek.
+        pass
+
+    content = await file.read()
+    if not content:
+        raise HTTPException(status_code=400, detail=empty_detail)
+
+    if max_size is not None and len(content) > max_size:
+        raise HTTPException(
+            status_code=400,
+            detail=f"File too large. Maximum size is {max_size / (1024 * 1024)}MB",
+        )
+
+    return content
+
+
 def _model_operation_conflict_response(task_manager, requested_kind: str, requested_model: str) -> JSONResponse:
     active_op = task_manager.get_model_operation_state()
     return JSONResponse(
@@ -465,14 +491,11 @@ async def import_profile(
     # Validate file size (max 100MB)
     MAX_FILE_SIZE = 100 * 1024 * 1024  # 100MB
     
-    # Read file content
-    content = await file.read()
-    
-    if len(content) > MAX_FILE_SIZE:
-        raise HTTPException(
-            status_code=400,
-            detail=f"File too large. Maximum size is {MAX_FILE_SIZE / (1024 * 1024)}MB"
-        )
+    content = await _read_upload_bytes_or_400(
+        file,
+        max_size=MAX_FILE_SIZE,
+        empty_detail="Uploaded profile archive is empty",
+    )
     
     try:
         profile = await export_import.import_profile_from_zip(content, db)
@@ -530,7 +553,10 @@ async def add_profile_sample(
     """Add a sample to a voice profile."""
     # Save uploaded file to temporary location
     with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
-        content = await file.read()
+        content = await _read_upload_bytes_or_400(
+            file,
+            empty_detail="Uploaded audio sample is empty",
+        )
         tmp.write(content)
         tmp_path = tmp.name
     
@@ -592,7 +618,10 @@ async def upload_profile_avatar(
     """Upload or update avatar image for a profile."""
     # Save uploaded file to temp location
     with tempfile.NamedTemporaryFile(delete=False, suffix=Path(file.filename).suffix) as tmp:
-        content = await file.read()
+        content = await _read_upload_bytes_or_400(
+            file,
+            empty_detail="Uploaded avatar image is empty",
+        )
         tmp.write(content)
         tmp_path = tmp.name
 
@@ -1019,14 +1048,11 @@ async def import_generation(
     # Validate file size (max 50MB)
     MAX_FILE_SIZE = 50 * 1024 * 1024  # 50MB
     
-    # Read file content
-    content = await file.read()
-    
-    if len(content) > MAX_FILE_SIZE:
-        raise HTTPException(
-            status_code=400,
-            detail=f"File too large. Maximum size is {MAX_FILE_SIZE / (1024 * 1024)}MB"
-        )
+    content = await _read_upload_bytes_or_400(
+        file,
+        max_size=MAX_FILE_SIZE,
+        empty_detail="Uploaded generation archive is empty",
+    )
     
     try:
         result = await export_import.import_generation_from_zip(content, db)
@@ -1159,7 +1185,10 @@ async def transcribe_audio(
     """Transcribe audio file to text."""
     # Save uploaded file to temporary location
     with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
-        content = await file.read()
+        content = await _read_upload_bytes_or_400(
+            file,
+            empty_detail="Uploaded audio for transcription is empty",
+        )
         tmp.write(content)
         tmp_path = tmp.name
 
